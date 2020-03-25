@@ -39,7 +39,7 @@ type PortMap map[ContainerPort]HostPort
 func (m PortMap) toNatPortMap() nat.PortMap {
 	out := make(nat.PortMap)
 	for k, v := range m {
-		out[toNatPort(k)] = []nat.PortBinding{{HostPort: strconv.Itoa(int(v))}}
+		out[toNatPort(k)] = []nat.PortBinding{{HostIP: "127.0.0.1", HostPort: strconv.Itoa(int(v))}}
 	}
 	return out
 }
@@ -47,7 +47,7 @@ func (m PortMap) toNatPortMap() nat.PortMap {
 // ContainerConfig for a Container.
 type ContainerConfig struct {
 	Name       string
-	Image      Image
+	Image      string
 	Aliases    []string
 	PortMap    PortMap
 	EntryPoint []string
@@ -89,7 +89,7 @@ func NewContainer(dockerClient *client.Client, config ContainerConfig) (*Contain
 	resp, err := dockerClient.ContainerCreate(context.Background(),
 		&dockerContainer.Config{
 			Hostname:     config.Hostname,
-			Image:        config.Image.String(),
+			Image:        config.Image,
 			AttachStderr: true,
 			AttachStdout: true,
 			ExposedPorts: exposedPorts,

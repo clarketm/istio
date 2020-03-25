@@ -48,10 +48,14 @@ func runTest(t *testing.T, ctx framework.TestContext) {
 		{
 			Name:     "foo",
 			Protocol: protocol.HTTP,
+			// We use a port > 1024 to not require root
+			InstancePort: 8090,
 		},
 		{
 			Name:     "http",
 			Protocol: protocol.HTTP,
+			// We use a port > 1024 to not require root
+			InstancePort: 8091,
 		},
 		{
 			Name:     "bar",
@@ -77,6 +81,7 @@ func runTest(t *testing.T, ctx framework.TestContext) {
 			Service:   "from-with-sidecar",
 			Namespace: ns,
 			Ports:     ports,
+			Subsets:   []echo.SubsetConfig{{}},
 			Galley:    g,
 			Pilot:     p,
 		}).
@@ -86,14 +91,19 @@ func runTest(t *testing.T, ctx framework.TestContext) {
 			Ports:     ports,
 			Galley:    g,
 			Pilot:     p,
-			Annotations: map[echo.Annotation]*echo.AnnotationValue{
-				echo.SidecarInject: {
-					Value: strconv.FormatBool(false)},
+			Subsets: []echo.SubsetConfig{
+				{
+					Annotations: map[echo.Annotation]*echo.AnnotationValue{
+						echo.SidecarInject: {
+							Value: strconv.FormatBool(false)},
+					},
+				},
 			},
 		}).
 		With(&to, echo.Config{
 			Service:   "to",
 			Namespace: ns,
+			Subsets:   []echo.SubsetConfig{{}},
 			Ports:     ports,
 			Galley:    g,
 			Pilot:     p,

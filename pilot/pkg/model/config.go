@@ -20,8 +20,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mitchellh/copystructure"
+	"istio.io/pkg/ledger"
 
+	udpa "github.com/cncf/udpa/go/udpa/type/v1"
 	"github.com/gogo/protobuf/proto"
 
 	mccpb "istio.io/api/mixer/v1/config/client"
@@ -30,8 +31,18 @@ import (
 	"istio.io/istio/pkg/config/constants"
 	"istio.io/istio/pkg/config/host"
 	"istio.io/istio/pkg/config/labels"
-	"istio.io/istio/pkg/config/schema"
-	"istio.io/istio/pkg/config/schemas"
+	"istio.io/istio/pkg/config/schema/collection"
+	"istio.io/istio/pkg/config/schema/collections"
+	"istio.io/istio/pkg/config/schema/resource"
+)
+
+var (
+	// Statically link protobuf descriptors from UDPA
+	_ = udpa.TypedStruct{}
+)
+
+const (
+	RevisionLabel = "istio.io/rev"
 )
 
 // ConfigMeta is metadata attached to each configuration unit.
@@ -85,6 +96,14 @@ type ConfigMeta struct {
 	CreationTimestamp time.Time `json:"creationTimestamp,omitempty"`
 }
 
+func (c Config) GroupVersionKind() resource.GroupVersionKind {
+	return resource.GroupVersionKind{
+		Group:   c.Group,
+		Version: c.Version,
+		Kind:    c.Type,
+	}
+}
+
 // Config is a configuration unit consisting of the type of configuration, the
 // key identifier that is unique per type, and the content represented as a
 // protobuf message.
@@ -123,17 +142,17 @@ type Config struct {
 // Object references supplied and returned from this interface should be
 // treated as read-only. Modifying them violates thread-safety.
 type ConfigStore interface {
-	// ConfigDescriptor exposes the configuration type schema known by the config store.
+	// Schemas exposes the configuration type schema known by the config store.
 	// The type schema defines the bidrectional mapping between configuration
 	// types and the protobuf encoding schema.
-	ConfigDescriptor() schema.Set
+	Schemas() collection.Schemas
 
 	// Get retrieves a configuration element by a type and a key
-	Get(typ, name, namespace string) *Config
+	Get(typ resource.GroupVersionKind, name, namespace string) *Config
 
 	// List returns objects by type and namespace.
 	// Use "" for the namespace to list across namespaces.
-	List(typ, namespace string) ([]Config, error)
+	List(typ resource.GroupVersionKind, namespace string) ([]Config, error)
 
 	// Create adds a new configuration object to the store. If an object with the
 	// same name and namespace for the type already exists, the operation fails
@@ -148,11 +167,15 @@ type ConfigStore interface {
 	Update(config Config) (newRevision string, err error)
 
 	// Delete removes an object from the store by key
-	Delete(typ, name, namespace string) error
+	Delete(typ resource.GroupVersionKind, name, namespace string) error
 
 	Version() string
 
 	GetResourceAtVersion(version string, key string) (resourceVersion string, err error)
+
+	GetLedger() ledger.Ledger
+
+	SetLedger(ledger.Ledger) error
 }
 
 // Key function for the configuration objects
@@ -184,7 +207,7 @@ type ConfigStoreCache interface {
 
 	// RegisterEventHandler adds a handler to receive config update events for a
 	// configuration type
-	RegisterEventHandler(typ string, handler func(Config, Event))
+	RegisterEventHandler(kind resource.GroupVersionKind, handler func(Config, Config, Event))
 
 	// Run until a signal is received
 	Run(stop <-chan struct{})
@@ -205,9 +228,6 @@ type IstioConfigStore interface {
 
 	// Gateways lists all gateways bound to the specified workload labels
 	Gateways(workloadLabels labels.Collection) []Config
-
-	// EnvoyFilter lists the envoy filter configuration bound to the specified workload labels
-	EnvoyFilter(workloadLabels labels.Collection) *Config
 
 	// QuotaSpecByDestination selects Mixerclient quota specifications
 	// associated with destination service instances.
@@ -327,10 +347,19 @@ func resolveGatewayName(gwname string, meta ConfigMeta) string {
 // MostSpecificHostMatch compares the elements of the stack to the needle, and returns the longest stack element
 // matching the needle, or false if no element in the stack matches the needle.
 func MostSpecificHostMatch(needle host.Name, stack []host.Name) (host.Name, bool) {
+	matches := []host.Name{}
 	for _, h := range stack {
-		if needle.Matches(h) {
-			return h, true
+		if needle == h {
+			// exact match, return immediately
+			return needle, true
 		}
+		if needle.Matches(h) {
+			matches = append(matches, h)
+		}
+	}
+	if len(matches) > 0 {
+		// TODO: return closest match out of all non-exact matching hosts
+		return matches[0], true
 	}
 	return "", false
 }
@@ -349,7 +378,7 @@ func MakeIstioStore(store ConfigStore) IstioConfigStore {
 }
 
 func (store *istioConfigStore) ServiceEntries() []Config {
-	serviceEntries, err := store.List(schemas.ServiceEntry.Type, NamespaceAll)
+	serviceEntries, err := store.List(collections.IstioNetworkingV1Alpha3Serviceentries.Resource().GroupVersionKind(), NamespaceAll)
 	if err != nil {
 		return nil
 	}
@@ -372,7 +401,7 @@ func sortConfigByCreationTime(configs []Config) {
 }
 
 func (store *istioConfigStore) Gateways(workloadLabels labels.Collection) []Config {
-	configs, err := store.List(schemas.Gateway.Type, NamespaceAll)
+	configs, err := store.List(collections.IstioNetworkingV1Alpha3Gateways.Resource().GroupVersionKind(), NamespaceAll)
 	if err != nil {
 		return nil
 	}
@@ -392,34 +421,6 @@ func (store *istioConfigStore) Gateways(workloadLabels labels.Collection) []Conf
 		}
 	}
 	return out
-}
-
-func (store *istioConfigStore) EnvoyFilter(workloadLabels labels.Collection) *Config {
-	configs, err := store.List(schemas.EnvoyFilter.Type, NamespaceAll)
-	if err != nil {
-		return nil
-	}
-
-	sortConfigByCreationTime(configs)
-
-	// When there are multiple envoy filter configurations for a workload
-	// merge them instead of randomly picking one
-	mergedFilterConfig := &networking.EnvoyFilter{}
-
-	for _, cfg := range configs {
-		filter := cfg.Spec.(*networking.EnvoyFilter)
-		// if there is no workload selector, the filter applies to all workloads
-		// if there is a workload selector, check for matching workload labels
-		if filter.WorkloadLabels != nil {
-			workloadSelector := labels.Instance(filter.WorkloadLabels)
-			if !workloadLabels.IsSupersetOf(workloadSelector) {
-				continue
-			}
-		}
-		mergedFilterConfig.Filters = append(mergedFilterConfig.Filters, filter.Filters...)
-	}
-
-	return &Config{Spec: mergedFilterConfig}
 }
 
 // matchWildcardService matches destinationHost to a wildcarded svc.
@@ -501,25 +502,9 @@ func findQuotaSpecRefs(instance *ServiceInstance, bindings []Config) map[string]
 	return refs
 }
 
-// QuotaSpecByDestination selects Mixerclient quota specifications
-// associated with destination service instances.
-func (store *istioConfigStore) QuotaSpecByDestination(instance *ServiceInstance) []Config {
-	log.Debugf("QuotaSpecByDestination(%v)", instance)
-	bindings, err := store.List(schemas.QuotaSpecBinding.Type, NamespaceAll)
-	if err != nil {
-		log.Warnf("Unable to fetch QuotaSpecBindings: %v", err)
-		return nil
-	}
-
-	log.Debugf("QuotaSpecByDestination bindings[%d] %v", len(bindings), bindings)
-	specs, err := store.List(schemas.QuotaSpec.Type, NamespaceAll)
-	if err != nil {
-		log.Warnf("Unable to fetch QuotaSpecs: %v", err)
-		return nil
-	}
-
-	log.Debugf("QuotaSpecByDestination specs[%d] %v", len(specs), specs)
-
+// filterQuotaSpecsByDestination provides QuotaSpecByDestination filtering logic as a
+// function that can be called on cached binding + spec sets
+func filterQuotaSpecsByDestination(instance *ServiceInstance, bindings []Config, specs []Config) []Config {
 	// Build the set of quota spec references bound to the service instance.
 	refs := findQuotaSpecRefs(instance, bindings)
 	log.Debugf("QuotaSpecByDestination refs:%v", refs)
@@ -541,8 +526,30 @@ func (store *istioConfigStore) QuotaSpecByDestination(instance *ServiceInstance)
 	return out
 }
 
+// QuotaSpecByDestination selects Mixerclient quota specifications
+// associated with destination service instances.
+func (store *istioConfigStore) QuotaSpecByDestination(instance *ServiceInstance) []Config {
+	log.Debugf("QuotaSpecByDestination(%v)", instance)
+	bindings, err := store.List(collections.IstioMixerV1ConfigClientQuotaspecbindings.Resource().GroupVersionKind(), NamespaceAll)
+	if err != nil {
+		log.Warnf("Unable to fetch QuotaSpecBindings: %v", err)
+		return nil
+	}
+
+	log.Debugf("QuotaSpecByDestination bindings[%d] %v", len(bindings), bindings)
+	specs, err := store.List(collections.IstioMixerV1ConfigClientQuotaspecs.Resource().GroupVersionKind(), NamespaceAll)
+	if err != nil {
+		log.Warnf("Unable to fetch QuotaSpecs: %v", err)
+		return nil
+	}
+
+	log.Debugf("QuotaSpecByDestination specs[%d] %v", len(specs), specs)
+
+	return filterQuotaSpecsByDestination(instance, bindings, specs)
+}
+
 func (store *istioConfigStore) ServiceRoles(namespace string) []Config {
-	roles, err := store.List(schemas.ServiceRole.Type, namespace)
+	roles, err := store.List(collections.IstioRbacV1Alpha1Serviceroles.Resource().GroupVersionKind(), namespace)
 	if err != nil {
 		log.Errorf("failed to get ServiceRoles in namespace %s: %v", namespace, err)
 		return nil
@@ -552,7 +559,7 @@ func (store *istioConfigStore) ServiceRoles(namespace string) []Config {
 }
 
 func (store *istioConfigStore) ServiceRoleBindings(namespace string) []Config {
-	bindings, err := store.List(schemas.ServiceRoleBinding.Type, namespace)
+	bindings, err := store.List(collections.IstioRbacV1Alpha1Servicerolebindings.Resource().GroupVersionKind(), namespace)
 	if err != nil {
 		log.Errorf("failed to get ServiceRoleBinding in namespace %s: %v", namespace, err)
 		return nil
@@ -562,7 +569,7 @@ func (store *istioConfigStore) ServiceRoleBindings(namespace string) []Config {
 }
 
 func (store *istioConfigStore) ClusterRbacConfig() *Config {
-	clusterRbacConfig, err := store.List(schemas.ClusterRbacConfig.Type, "")
+	clusterRbacConfig, err := store.List(collections.IstioRbacV1Alpha1Clusterrbacconfigs.Resource().GroupVersionKind(), "")
 	if err != nil {
 		log.Errorf("failed to get ClusterRbacConfig: %v", err)
 	}
@@ -575,7 +582,7 @@ func (store *istioConfigStore) ClusterRbacConfig() *Config {
 }
 
 func (store *istioConfigStore) RbacConfig() *Config {
-	rbacConfigs, err := store.List(schemas.RbacConfig.Type, "")
+	rbacConfigs, err := store.List(collections.IstioRbacV1Alpha1Rbacconfigs.Resource().GroupVersionKind(), "")
 	if err != nil {
 		return nil
 	}
@@ -593,7 +600,7 @@ func (store *istioConfigStore) RbacConfig() *Config {
 }
 
 func (store *istioConfigStore) AuthorizationPolicies(namespace string) []Config {
-	authorizationPolicies, err := store.List(schemas.AuthorizationPolicy.Type, namespace)
+	authorizationPolicies, err := store.List(collections.IstioSecurityV1Beta1Authorizationpolicies.Resource().GroupVersionKind(), namespace)
 	if err != nil {
 		log.Errorf("failed to get AuthorizationPolicy in namespace %s: %v", namespace, err)
 		return nil
@@ -612,14 +619,9 @@ func SortQuotaSpec(specs []Config) {
 	})
 }
 
-func (config Config) DeepCopy() Config {
-	copied, err := copystructure.Copy(config)
-	if err != nil {
-		// There are 2 locations where errors are generated in copystructure.Copy:
-		//  * The reflection walk over the structure fails, which should never happen
-		//  * A configurable copy function returns an error. This is only used for copying times, which never returns an error.
-		// Therefore, this should never happen
-		panic(err)
-	}
-	return copied.(Config)
+func (c Config) DeepCopy() Config {
+	var clone Config
+	clone.ConfigMeta = c.ConfigMeta
+	clone.Spec = proto.Clone(c.Spec)
+	return clone
 }

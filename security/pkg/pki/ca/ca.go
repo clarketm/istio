@@ -60,7 +60,7 @@ const (
 	caKeySize = 2048
 )
 
-var pkiCaLog = log.RegisterScope("pkiCaLog", "Citadel CA log", 0)
+var pkiCaLog = log.RegisterScope("pkica", "Citadel CA log", 0)
 
 // caTypes is the enum for the CA type.
 type caTypes int
@@ -77,8 +77,8 @@ const (
 type IstioCAOptions struct {
 	CAType caTypes
 
-	CertTTL    time.Duration
-	MaxCertTTL time.Duration
+	DefaultCertTTL time.Duration
+	MaxCertTTL     time.Duration
 
 	KeyCertBundle util.KeyCertBundle
 
@@ -91,7 +91,7 @@ type IstioCAOptions struct {
 
 // NewSelfSignedIstioCAOptions returns a new IstioCAOptions instance using self-signed certificate.
 func NewSelfSignedIstioCAOptions(ctx context.Context,
-	rootCertGracePeriodPercentile int, caCertTTL, rootCertCheckInverval, certTTL,
+	rootCertGracePeriodPercentile int, caCertTTL, rootCertCheckInverval, defaultCertTTL,
 	maxCertTTL time.Duration, org string, dualUse bool, namespace string,
 	readCertRetryInterval time.Duration, client corev1.CoreV1Interface,
 	rootCertFile string, enableJitter bool) (caOpts *IstioCAOptions, err error) {
@@ -116,9 +116,9 @@ func NewSelfSignedIstioCAOptions(ctx context.Context,
 	}
 
 	caOpts = &IstioCAOptions{
-		CAType:     selfSignedCA,
-		CertTTL:    certTTL,
-		MaxCertTTL: maxCertTTL,
+		CAType:         selfSignedCA,
+		DefaultCertTTL: defaultCertTTL,
+		MaxCertTTL:     maxCertTTL,
 		RotatorConfig: &SelfSignedCARootCertRotatorConfig{
 			CheckInterval:      rootCertCheckInverval,
 			caCertTTL:          caCertTTL,
@@ -187,11 +187,11 @@ func NewSelfSignedIstioCAOptions(ctx context.Context,
 
 // NewPluggedCertIstioCAOptions returns a new IstioCAOptions instance using given certificate.
 func NewPluggedCertIstioCAOptions(certChainFile, signingCertFile, signingKeyFile, rootCertFile string,
-	certTTL, maxCertTTL time.Duration, namespace string, client corev1.CoreV1Interface) (caOpts *IstioCAOptions, err error) {
+	defaultCertTTL, maxCertTTL time.Duration, namespace string, client corev1.CoreV1Interface) (caOpts *IstioCAOptions, err error) {
 	caOpts = &IstioCAOptions{
-		CAType:     pluggedCertCA,
-		CertTTL:    certTTL,
-		MaxCertTTL: maxCertTTL,
+		CAType:         pluggedCertCA,
+		DefaultCertTTL: defaultCertTTL,
+		MaxCertTTL:     maxCertTTL,
 	}
 	if caOpts.KeyCertBundle, err = util.NewVerifiedKeyCertBundleFromFile(
 		signingCertFile, signingKeyFile, certChainFile, rootCertFile); err != nil {
@@ -229,8 +229,8 @@ func NewPluggedCertIstioCAOptions(certChainFile, signingCertFile, signingKeyFile
 
 // IstioCA generates keys and certificates for Istio identities.
 type IstioCA struct {
-	certTTL    time.Duration
-	maxCertTTL time.Duration
+	defaultCertTTL time.Duration
+	maxCertTTL     time.Duration
 
 	keyCertBundle util.KeyCertBundle
 
@@ -244,10 +244,10 @@ type IstioCA struct {
 // NewIstioCA returns a new IstioCA instance.
 func NewIstioCA(opts *IstioCAOptions) (*IstioCA, error) {
 	ca := &IstioCA{
-		certTTL:       opts.CertTTL,
-		maxCertTTL:    opts.MaxCertTTL,
-		keyCertBundle: opts.KeyCertBundle,
-		livenessProbe: probe.NewProbe(),
+		defaultCertTTL: opts.DefaultCertTTL,
+		maxCertTTL:     opts.MaxCertTTL,
+		keyCertBundle:  opts.KeyCertBundle,
+		livenessProbe:  probe.NewProbe(),
 	}
 
 	if opts.CAType == selfSignedCA && opts.RotatorConfig.CheckInterval > time.Duration(0) {
@@ -280,7 +280,7 @@ func (ca *IstioCA) Sign(csrPEM []byte, subjectIDs []string, requestedLifetime ti
 	lifetime := requestedLifetime
 	// If the requested requestedLifetime is non-positive, apply the default TTL.
 	if requestedLifetime.Seconds() <= 0 {
-		lifetime = ca.certTTL
+		lifetime = ca.defaultCertTTL
 	}
 	// If the requested TTL is greater than maxCertTTL, return an error
 	if requestedLifetime.Seconds() > ca.maxCertTTL.Seconds() {
@@ -324,4 +324,24 @@ func updateCertInConfigmap(namespace string, client corev1.CoreV1Interface, cert
 	certEncoded := base64.StdEncoding.EncodeToString(cert)
 	cmc := configmap.NewController(namespace, client)
 	return cmc.InsertCATLSRootCert(certEncoded)
+}
+
+// GenKeyCert() generates a certificate signed by the CA and
+// returns the certificate chain and the private key.
+func (ca *IstioCA) GenKeyCert(hostnames []string, certTTL time.Duration) ([]byte, []byte, error) {
+	opts := util.CertOptions{
+		RSAKeySize: 2048,
+	}
+
+	csrPEM, privPEM, err := util.GenCSR(opts)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	certPEM, err := ca.SignWithCertChain(csrPEM, hostnames, certTTL, false)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return certPEM, privPEM, nil
 }

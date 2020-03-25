@@ -22,12 +22,13 @@ import (
 	"google.golang.org/grpc"
 
 	istioMixerV1 "istio.io/api/mixer/v1"
+	"istio.io/pkg/attribute"
+
 	attr "istio.io/istio/mixer/pkg/attribute"
 	"istio.io/istio/mixer/pkg/server"
 	"istio.io/istio/pkg/test"
 	"istio.io/istio/pkg/test/framework/resource"
 	"istio.io/istio/pkg/test/kube"
-	"istio.io/pkg/attribute"
 )
 
 const (
@@ -49,10 +50,6 @@ type client struct {
 	args    *server.Args
 	server  *server.Server
 	workdir string
-
-	// AttributeManifest is injected into the configuration in the local environment. in Kubernetes, it
-	// should already exist as part of Istio deployment.
-	attributeManifest string
 }
 
 // Report implements DeployedMixer.Report.

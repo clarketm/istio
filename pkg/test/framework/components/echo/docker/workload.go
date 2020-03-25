@@ -23,12 +23,12 @@ import (
 	"strings"
 	"time"
 
-	"istio.io/istio/pkg/test"
-
-	envoyAdmin "github.com/envoyproxy/go-control-plane/envoy/admin/v2alpha"
+	envoyAdmin "github.com/envoyproxy/go-control-plane/envoy/admin/v3"
 	"github.com/golang/protobuf/jsonpb"
 	"github.com/google/uuid"
 	"github.com/hashicorp/go-multierror"
+
+	"istio.io/istio/pkg/test"
 
 	"istio.io/api/mesh/v1alpha1"
 	"istio.io/istio/pkg/test/docker"
@@ -78,7 +78,7 @@ func newWorkload(e *native.Environment, cfg echo.Config, dumpDir string) (out *w
 	}
 
 	// Get the Docker images for the Echo application.
-	imgs, err := images.Get(e)
+	imgs, err := images.Get()
 	if err != nil {
 		return nil, err
 	}
@@ -108,12 +108,12 @@ func newWorkload(e *native.Environment, cfg echo.Config, dumpDir string) (out *w
 		"--version", cfg.Version,
 	}, w.portMap.toEchoArgs()...)
 
-	var image docker.Image
+	var image string
 	var cmd []string
 	var env []string
 	var extraHosts []string
 	var capabilities []string
-	if cfg.Annotations.GetBool(echo.SidecarInject) {
+	if cfg.Subsets[0].Annotations.GetBool(echo.SidecarInject) {
 		w.readinessProbe = sidecarReadinessProbe(w.portMap.hostAgentPort)
 
 		image = imgs.Sidecar
@@ -121,7 +121,7 @@ func newWorkload(e *native.Environment, cfg echo.Config, dumpDir string) (out *w
 		// Need NET_ADMIN for iptables.
 		capabilities = []string{"NET_ADMIN"}
 
-		pilotHost := fmt.Sprintf("istio-pilot.%s", e.SystemNamespace)
+		pilotHost := fmt.Sprintf("istiod.%s.svc", e.SystemNamespace)
 
 		pilotAddress := fmt.Sprintf("%s:%d", pilotHost, discoveryPort(cfg.Pilot))
 
@@ -139,6 +139,7 @@ func newWorkload(e *native.Environment, cfg echo.Config, dumpDir string) (out *w
 
 		metaJSONLabels := fmt.Sprintf("{\"app\":\"%s\"}", cfg.Service)
 		interceptionMode := "REDIRECT"
+		propCert := "./var/lib/istio/default"
 
 		env = append(env,
 			"ECHO_ARGS="+strings.Join(echoArgs, " "),
@@ -148,9 +149,12 @@ func newWorkload(e *native.Environment, cfg echo.Config, dumpDir string) (out *w
 			"POD_NAME="+hostName,
 			"POD_NAMESPACE="+cfg.Namespace.Name(),
 			"PILOT_ADDRESS="+pilotAddress,
-			"CITADEL_ADDRESS=istio-citadel:8060", // TODO: need local citadel
+			"CA_ADDR="+pilotAddress,
+			"PROV_CERT="+propCert,
 			"ENVOY_PORT=15001",
 			"ENVOY_USER=istio-proxy",
+			"PROXY_UID=1337",
+			"PROXY_GID=1337",
 			"ISTIO_AGENT_FLAGS="+agentArgs,
 			"ISTIO_INBOUND_INTERCEPTION_MODE="+interceptionMode,
 			"ISTIO_SERVICE_CIDR=*",
@@ -197,7 +201,7 @@ func newWorkload(e *native.Environment, cfg echo.Config, dumpDir string) (out *w
 			err, containerCfg)
 	}
 
-	if cfg.Annotations.GetBool(echo.SidecarInject) {
+	if cfg.Subsets[0].Annotations.GetBool(echo.SidecarInject) {
 		if w.sidecar, err = newSidecar(w.container); err != nil {
 			return nil, fmt.Errorf("failed creating sidecar for Echo Container %s: %v",
 				w.container.Name, err)
@@ -214,7 +218,7 @@ func (w *workload) waitForReady() (err error) {
 	}
 
 	// Now create the GRPC client.
-	if w.Instance, err = client.New(fmt.Sprintf("%s:%d", localhost, w.portMap.grpc().hostPort)); err != nil {
+	if w.Instance, err = client.New(fmt.Sprintf("%s:%d", localhost, w.portMap.grpc().hostPort), nil); err != nil {
 		return fmt.Errorf("failed creating GRPC client for Echo container %s: %v", w.container.Name, err)
 	}
 	return nil
@@ -258,6 +262,7 @@ func (w *workload) Dump() {
 		srcFiles := []string{
 			"/var/log/istio/istio.log",
 			"/var/log/istio/istio.err.log",
+			"/var/log/istio/access.log",
 		}
 
 		for _, srcFile := range srcFiles {

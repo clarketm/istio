@@ -25,7 +25,6 @@ import (
 type AnnotationType string
 
 const (
-	ServiceAnnotation  AnnotationType = "service"
 	WorkloadAnnotation AnnotationType = "workload"
 )
 
@@ -36,25 +35,11 @@ type Annotation struct {
 }
 
 var (
-	SidecarInject                         = workloadAnnotation(annotation.SidecarInject.Name, "true")
-	SidecarStatus                         = workloadAnnotation(annotation.SidecarStatus.Name, "")
-	SidecarRewriteAppHTTPProbers          = workloadAnnotation(annotation.SidecarRewriteAppHTTPProbers.Name, "")
-	SidecarProxyImage                     = workloadAnnotation(annotation.SidecarProxyImage.Name, "")
-	SidecarInterceptionMode               = workloadAnnotation(annotation.SidecarInterceptionMode.Name, "")
-	SidecarStatusPort                     = workloadAnnotation(annotation.SidecarStatusPort.Name, "")
-	SidecarReadinessInitialDelaySeconds   = workloadAnnotation(annotation.SidecarStatusReadinessInitialDelaySeconds.Name, "")
-	SidecarReadinessPeriodSeconds         = workloadAnnotation(annotation.SidecarStatusReadinessPeriodSeconds.Name, "")
-	SidecarReadinessFailoverThreshold     = workloadAnnotation(annotation.SidecarStatusReadinessFailureThreshold.Name, "")
-	SidecarTrafficIncludeOutboundIPRanges = workloadAnnotation(annotation.SidecarTrafficIncludeOutboundIPRanges.Name, "")
-	SidecarTrafficExcludeOutboundIPRanges = workloadAnnotation(annotation.SidecarTrafficExcludeOutboundIPRanges.Name, "")
-	SidecarTrafficIncludeInboundPorts     = workloadAnnotation(annotation.SidecarTrafficIncludeInboundPorts.Name, "")
-	SidecarTrafficExcludeInboundPorts     = workloadAnnotation(annotation.SidecarTrafficExcludeInboundPorts.Name, "")
-	SidecarTrafficKubeVirtInterfaces      = workloadAnnotation(annotation.SidecarTrafficKubevirtInterfaces.Name, "")
-
-	KubeServiceAccountsOnVMA = serviceAnnotation(annotation.AlphaKubernetesServiceAccounts.Name, "")
-	CanonicalServiceAccounts = serviceAnnotation(annotation.AlphaCanonicalServiceAccounts.Name, "")
-	ServiceExport            = serviceAnnotation(annotation.NetworkingExportTo.Name, "")
-	WorkloadIdentity         = workloadAnnotation(annotation.AlphaIdentity.Name, "")
+	SidecarInject                = workloadAnnotation(annotation.SidecarInject.Name, "true")
+	SidecarRewriteAppHTTPProbers = workloadAnnotation(annotation.SidecarRewriteAppHTTPProbers.Name, "")
+	SidecarBootstrapOverride     = workloadAnnotation(annotation.SidecarBootstrapOverride.Name, "")
+	SidecarVolumeMount           = workloadAnnotation(annotation.SidecarUserVolumeMount.Name, "")
+	SidecarVolume                = workloadAnnotation(annotation.SidecarUserVolume.Name, "")
 )
 
 type AnnotationValue struct {
@@ -90,16 +75,6 @@ func (v *AnnotationValue) SetInt(arg int) *AnnotationValue {
 
 func NewAnnotationValue() *AnnotationValue {
 	return &AnnotationValue{}
-}
-
-func serviceAnnotation(name string, value string) Annotation {
-	return Annotation{
-		Name: name,
-		Type: ServiceAnnotation,
-		Default: AnnotationValue{
-			Value: value,
-		},
-	}
 }
 
 func workloadAnnotation(name string, value string) Annotation {

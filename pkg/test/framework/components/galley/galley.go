@@ -16,9 +16,9 @@ package galley
 
 import (
 	"istio.io/istio/pkg/test"
-	"istio.io/istio/pkg/test/framework/components/environment"
 	"istio.io/istio/pkg/test/framework/components/namespace"
 	"istio.io/istio/pkg/test/framework/resource"
+	"istio.io/istio/pkg/test/framework/resource/environment"
 )
 
 // Instance of Galley
@@ -67,6 +67,15 @@ type Config struct {
 
 	// MeshConfig to use for this instance.
 	MeshConfig string
+
+	// CreateClient determines if a real connection should be established with Galley. This is a workaround
+	// to support Kubernetes environments where Galley is not running.
+	// This field is ignored on native
+	// TODO(https://github.com/istio/istio/issues/20299) remove this field
+	CreateClient bool
+
+	// Cluster to be used in a multicluster environment
+	Cluster resource.Cluster
 }
 
 // New returns a new instance of echo.

@@ -23,7 +23,7 @@ import (
 	"path"
 	"time"
 
-	envoyAdmin "github.com/envoyproxy/go-control-plane/envoy/admin/v2alpha"
+	envoyAdmin "github.com/envoyproxy/go-control-plane/envoy/admin/v3"
 	"github.com/gogo/protobuf/types"
 
 	meshconfig "istio.io/api/mesh/v1alpha1"
@@ -51,14 +51,15 @@ type ProxyConfig struct {
 	PilotSubjectAltName []string
 	MixerSubjectAltName []string
 	NodeIPs             []string
-	DNSRefreshRate      string
 	PodName             string
 	PodNamespace        string
 	PodIP               net.IP
-	SDSUDSPath          string
-	SDSTokenPath        string
+	STSPort             int
 	ControlPlaneAuth    bool
 	DisableReportCalls  bool
+	OutlierLogPath      string
+	PilotCertProvider   string
+	ProvCert            string
 }
 
 // NewProxy creates an instance of the proxy control commands
@@ -151,7 +152,6 @@ func (e *envoy) Run(config interface{}, epoch int, abort <-chan error) error {
 	} else {
 		out, err := bootstrap.New(bootstrap.Config{
 			Node:                e.Node,
-			DNSRefreshRate:      e.DNSRefreshRate,
 			Proxy:               &e.Config,
 			PilotSubjectAltName: e.PilotSubjectAltName,
 			MixerSubjectAltName: e.MixerSubjectAltName,
@@ -160,15 +160,16 @@ func (e *envoy) Run(config interface{}, epoch int, abort <-chan error) error {
 			PodName:             e.PodName,
 			PodNamespace:        e.PodNamespace,
 			PodIP:               e.PodIP,
-			SDSUDSPath:          e.SDSUDSPath,
-			SDSTokenPath:        e.SDSTokenPath,
+			STSPort:             e.STSPort,
 			ControlPlaneAuth:    e.ControlPlaneAuth,
 			DisableReportCalls:  e.DisableReportCalls,
+			OutlierLogPath:      e.OutlierLogPath,
+			PilotCertProvider:   e.PilotCertProvider,
+			ProvCert:            e.ProvCert,
 		}).CreateFileForEpoch(epoch)
 		if err != nil {
 			log.Errora("Failed to generate bootstrap config: ", err)
 			os.Exit(1) // Prevent infinite loop attempting to write the file, let k8s/systemd report
-			return err
 		}
 		fname = out
 	}
@@ -202,6 +203,10 @@ func (e *envoy) Run(config interface{}, epoch int, abort <-chan error) error {
 }
 
 func (e *envoy) Cleanup(epoch int) {
+	// should return when use the parameter "--templateFile=/path/xxx.tmpl".
+	if e.Config.CustomConfigFile != "" {
+		return
+	}
 	filePath := configFile(e.Config.ConfigPath, epoch)
 	if err := os.Remove(filePath); err != nil {
 		log.Warnf("Failed to delete config file %s for %d, %v", filePath, epoch, err)

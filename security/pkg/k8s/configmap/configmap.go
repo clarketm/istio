@@ -26,7 +26,7 @@ import (
 	corev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 )
 
-var configMapLog = log.RegisterScope("configMapController", "ConfigMap controller log", 0)
+var configMapLog = log.RegisterScope("configmapcontroller", "ConfigMap controller log", 0)
 
 const (
 	IstioSecurityConfigMapName = "istio-security"
@@ -49,6 +49,9 @@ func NewController(namespace string, core corev1.CoreV1Interface) *Controller {
 
 // InsertCATLSRootCert updates the CA TLS root certificate in the configmap.
 func (c *Controller) InsertCATLSRootCert(value string) error {
+	if c.core == nil {
+		return nil
+	}
 	configmap, err := c.core.ConfigMaps(c.namespace).Get(IstioSecurityConfigMapName, metav1.GetOptions{})
 	exists := true
 	if err != nil {

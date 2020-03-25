@@ -17,9 +17,9 @@ package bookinfo
 import (
 	"istio.io/istio/pkg/test"
 	"istio.io/istio/pkg/test/framework/components/deployment"
-	"istio.io/istio/pkg/test/framework/components/environment"
 	"istio.io/istio/pkg/test/framework/components/namespace"
 	"istio.io/istio/pkg/test/framework/resource"
+	"istio.io/istio/pkg/test/framework/resource/environment"
 )
 
 type Config struct {
@@ -27,7 +27,7 @@ type Config struct {
 	Cfg       bookInfoConfig
 }
 
-// DeployOrFail returns a new instance of deployed BookInfo or fails test
+// Deploy returns a new instance of deployed BookInfo
 func Deploy(ctx resource.Context, cfg Config) (i deployment.Instance, err error) {
 	err = resource.UnsupportedEnvironment(ctx.Environment())
 

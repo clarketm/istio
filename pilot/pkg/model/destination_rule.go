@@ -42,7 +42,7 @@ func (ps *PushContext) combineSingleDestinationRule(
 				mdr.subsets[subset.Name] = struct{}{}
 				combinedRule.Subsets = append(combinedRule.Subsets, subset)
 			} else {
-				ps.Add(DuplicatedSubsets, string(resolvedHost), nil,
+				ps.AddMetric(DuplicatedSubsets, string(resolvedHost), nil,
 					fmt.Sprintf("Duplicate subset %s found while merging destination rules for %s",
 						subset.Name, string(resolvedHost)))
 			}
@@ -55,9 +55,19 @@ func (ps *PushContext) combineSingleDestinationRule(
 		return combinedDestRuleHosts
 	}
 
+	copyDestRuleConfig := Config{
+		ConfigMeta: destRuleConfig.ConfigMeta,
+		Spec: &networking.DestinationRule{
+			Host:          rule.Host,
+			TrafficPolicy: rule.TrafficPolicy,
+			Subsets:       rule.Subsets,
+			ExportTo:      rule.ExportTo,
+		},
+	}
+
 	combinedDestRuleMap[resolvedHost] = &combinedDestinationRule{
 		subsets: make(map[string]struct{}),
-		config:  &destRuleConfig,
+		config:  &copyDestRuleConfig,
 	}
 	for _, subset := range rule.Subsets {
 		combinedDestRuleMap[resolvedHost].subsets[subset.Name] = struct{}{}

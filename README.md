@@ -1,7 +1,5 @@
 [![Go Report Card](https://goreportcard.com/badge/github.com/istio/istio)](https://goreportcard.com/report/github.com/istio/istio)
 [![GoDoc](https://godoc.org/istio.io/istio?status.svg)](https://godoc.org/istio.io/istio)
-[![codecov.io](https://codecov.io/github/istio/istio/coverage.svg?branch=master)](https://codecov.io/github/istio/istio?branch=master)
-[![GolangCI](https://golangci.com/badges/github.com/istio/istio.svg)](https://golangci.com/r/github.com/istio/istio)
 
 # Istio
 
@@ -57,6 +55,8 @@ Istio is composed of these components:
 - **Citadel Agent** - A per-node component responsible for certificate issuance and rotation.
 
 - **Galley**- Central component for validating, ingesting, aggregating, transforming and distributing config within Istio.
+
+- **Operator**- The component provides user friendly options to operate the Istio service mesh.
 
 Istio currently supports Kubernetes and Consul-based environments. We plan support for additional platforms such as
 Cloud Foundry, and Mesos in the near future.

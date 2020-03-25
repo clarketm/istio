@@ -17,19 +17,17 @@ package istio
 import (
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
-
-	"github.com/mitchellh/go-homedir"
 
 	yaml2 "gopkg.in/yaml.v2"
 
 	"istio.io/istio/pkg/test"
 	"istio.io/istio/pkg/test/env"
-	"istio.io/istio/pkg/test/framework/core/image"
+	"istio.io/istio/pkg/test/framework/image"
 	"istio.io/istio/pkg/test/framework/resource"
-	"istio.io/istio/pkg/test/util/file"
 
 	kubeCore "k8s.io/api/core/v1"
 )
@@ -38,16 +36,15 @@ const (
 	// DefaultSystemNamespace default value for SystemNamespace
 	DefaultSystemNamespace = "istio-system"
 
-	// ValuesMcpFile for Istio Helm deployment.
-	E2EValuesFile = "test-values/values-e2e.yaml"
+	// IntegrationTestDefaultsIOP is the path of the default IstioOperator spec to use
+	// for integration tests
+	IntegrationTestDefaultsIOP = "tests/integration/iop-integration-test-defaults.yaml"
 
 	// DefaultDeployTimeout for Istio
 	DefaultDeployTimeout = time.Second * 300
 
-	// TODO(https://github.com/istio/istio/issues/12606): This timeout is insanely large, but Prow seems to take a lot of time
-	//  pulling images.
 	// DefaultCIDeployTimeout for Istio
-	DefaultCIDeployTimeout = time.Minute * 20
+	DefaultCIDeployTimeout = time.Minute * 10
 
 	// DefaultUndeployTimeout for Istio.
 	DefaultUndeployTimeout = time.Second * 300
@@ -70,10 +67,9 @@ var (
 		DeployIstio:                    true,
 		DeployTimeout:                  0,
 		UndeployTimeout:                0,
-		ChartDir:                       env.IstioChartDir,
-		CrdsFilesDir:                   env.CrdsFilesDir,
-		ValuesFile:                     E2EValuesFile,
+		IOPFile:                        IntegrationTestDefaultsIOP,
 		CustomSidecarInjectorNamespace: "",
+		ControlPlaneTopology:           make(map[resource.ClusterIndex]resource.ClusterIndex),
 	}
 )
 
@@ -106,20 +102,23 @@ type Config struct {
 	// UndeployTimeout the timeout for undeploying Istio.
 	UndeployTimeout time.Duration
 
-	// The top-level Helm chart dir.
-	ChartDir string
+	// The IstioOperator spec file to be used for defaults
+	IOPFile string
 
-	// The top-level Helm Crds files dir.
-	CrdsFilesDir string
-
-	// The Helm values file to be used.
-	ValuesFile string
+	// Override values specifically for the ICP crd
+	// This is mostly required for cases where --set cannot be used
+	// If specified, Values will be ignored
+	ControlPlaneValues string
 
 	// Overrides for the Helm values file.
 	Values map[string]string
 
 	// Indicates that the test should deploy Istio into the target Kubernetes cluster before running tests.
 	DeployIstio bool
+
+	// ControlPlaneTopology maps each cluster to the cluster that runs its control plane. For replicated control
+	// plane cases (where each cluster has its own control plane), the cluster will map to itself (e.g. 0->0).
+	ControlPlaneTopology map[resource.ClusterIndex]resource.ClusterIndex
 
 	// Do not wait for the validation webhook before completing the deployment. This is useful for
 	// doing deployments without Galley.
@@ -130,32 +129,73 @@ type Config struct {
 	CustomSidecarInjectorNamespace string
 }
 
-// Is mtls enabled. Check in Values flag and Values file.
+// IsMtlsEnabled checks in Values flag and Values file.
 func (c *Config) IsMtlsEnabled() bool {
-	if c.Values["global.mtls.enabled"] == "true" {
+	if c.Values["global.mtls.enabled"] == "true" ||
+		c.Values["global.mtls.auto"] == "true" {
 		return true
 	}
 
-	data, err := file.AsString(filepath.Join(c.ChartDir, c.ValuesFile))
-	if err != nil {
-		return false
-	}
 	m := make(map[interface{}]interface{})
-	err = yaml2.Unmarshal([]byte(data), &m)
+	err := yaml2.Unmarshal([]byte(c.ControlPlaneValues), &m)
 	if err != nil {
 		return false
 	}
-	if m["global"] != nil {
-		switch globalVal := m["global"].(type) {
+	if m["values"] != nil {
+		switch values := m["values"].(type) {
 		case map[interface{}]interface{}:
-			switch mtlsVal := globalVal["mtls"].(type) {
-			case map[interface{}]interface{}:
-				return mtlsVal["enabled"].(bool)
+			if values["global"] != nil {
+				switch globalVal := values["global"].(type) {
+				case map[interface{}]interface{}:
+					switch mtlsVal := globalVal["mtls"].(type) {
+					case map[interface{}]interface{}:
+						if !mtlsVal["enabled"].(bool) && !mtlsVal["auto"].(bool) {
+							return false
+						}
+					}
+				}
 			}
 		}
 	}
 
-	return false
+	return true
+}
+
+func (c *Config) IstioOperatorConfigYAML() string {
+	data := ""
+	if c.ControlPlaneValues != "" {
+		data = Indent(c.ControlPlaneValues, "  ")
+	}
+
+	s, err := image.SettingsFromCommandLine()
+	if err != nil {
+		return ""
+	}
+
+	return fmt.Sprintf(`
+apiVersion: install.istio.io/v1alpha1
+kind: IstioOperator
+spec:
+  hub: %s
+  tag: %s
+%s
+`, s.Hub, s.Tag, data)
+}
+
+// Indent indents a block of text with an indent string
+func Indent(text, indent string) string {
+	if text[len(text)-1:] == "\n" {
+		result := ""
+		for _, j := range strings.Split(text[:len(text)-1], "\n") {
+			result += indent + j + "\n"
+		}
+		return result
+	}
+	result := ""
+	for _, j := range strings.Split(strings.TrimRight(text, "\n"), "\n") {
+		result += indent + j + "\n"
+	}
+	return result[:len(result)-1]
 }
 
 // DefaultConfig creates a new Config from defaults, environments variables, and command-line parameters.
@@ -163,15 +203,12 @@ func DefaultConfig(ctx resource.Context) (Config, error) {
 	// Make a local copy.
 	s := *settingsFromCommandline
 
-	if err := normalizeFile(&s.ChartDir); err != nil {
-		return Config{}, err
+	iopFile := s.IOPFile
+	if iopFile != "" && !path.IsAbs(s.IOPFile) {
+		iopFile = filepath.Join(env.IstioSrc, s.IOPFile)
 	}
 
-	if err := checkFileExists(filepath.Join(s.ChartDir, s.ValuesFile)); err != nil {
-		return Config{}, err
-	}
-
-	if err := normalizeFile(&s.CrdsFilesDir); err != nil {
+	if err := checkFileExists(iopFile); err != nil {
 		return Config{}, err
 	}
 
@@ -202,17 +239,6 @@ func DefaultConfigOrFail(t test.Failer, ctx resource.Context) Config {
 		t.Fatalf("Get istio config: %v", err)
 	}
 	return cfg
-}
-
-func normalizeFile(path *string) error {
-	// If the path uses the homedir ~, expand the path.
-	var err error
-	*path, err = homedir.Expand(*path)
-	if err != nil {
-		return err
-	}
-
-	return checkFileExists(*path)
 }
 
 func checkFileExists(path string) error {
@@ -287,11 +313,10 @@ func (c *Config) String() string {
 	result += fmt.Sprintf("DeployTimeout:                  %s\n", c.DeployTimeout.String())
 	result += fmt.Sprintf("UndeployTimeout:                %s\n", c.UndeployTimeout.String())
 	result += fmt.Sprintf("Values:                         %v\n", c.Values)
-	result += fmt.Sprintf("ChartDir:                       %s\n", c.ChartDir)
-	result += fmt.Sprintf("CrdsFilesDir:                   %s\n", c.CrdsFilesDir)
-	result += fmt.Sprintf("ValuesFile:                     %s\n", c.ValuesFile)
+	result += fmt.Sprintf("IOPFile:                        %s\n", c.IOPFile)
 	result += fmt.Sprintf("SkipWaitForValidationWebhook:   %v\n", c.SkipWaitForValidationWebhook)
 	result += fmt.Sprintf("CustomSidecarInjectorNamespace: %s\n", c.CustomSidecarInjectorNamespace)
+	result += fmt.Sprintf("ControlPlaneTopology:           %v\n", c.ControlPlaneTopology)
 
 	return result
 }

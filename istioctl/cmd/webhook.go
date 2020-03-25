@@ -74,6 +74,9 @@ func (opts *enableCliOptions) Validate() error {
 	if !opts.enableValidationWebhook && !opts.enableMutationWebhook {
 		return fmt.Errorf("no webhook to enable")
 	}
+	if len(opts.webhookSecretNameSpace) == 0 {
+		return fmt.Errorf("--namespace <namespace-of-webhook-secret> is required")
+	}
 	if opts.enableValidationWebhook {
 		if len(opts.validationWebhookConfigPath) == 0 {
 			return fmt.Errorf("--validation-path <yaml-file> is required for the validation webhook configuration")
@@ -217,7 +220,7 @@ istioctl experimental post-install webhook enable --validation --webhook-secret 
 		"The file path of the injection webhook configuration.")
 	flags.StringVar(&opts.validatingWebhookServiceName, "validation-service", "istio-galley",
 		"The service name of the validation webhook to manage.")
-	flags.StringVar(&opts.mutatingWebhookServiceName, "injection-service", "istio-sidecar-injector",
+	flags.StringVar(&opts.mutatingWebhookServiceName, "injection-service", "istio-pilot",
 		"The service name of the injection webhook to manage.")
 	flags.StringVar(&opts.webhookSecretName, "webhook-secret", "",
 		"The name of an existing Kubernetes secret of a webhook. istioctl will verify that the "+

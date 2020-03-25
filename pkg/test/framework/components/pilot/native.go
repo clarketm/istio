@@ -18,9 +18,13 @@ import (
 	"errors"
 	"io"
 	"net"
+	"os"
+	"path"
 	"time"
 
-	multierror "github.com/hashicorp/go-multierror"
+	"istio.io/istio/pilot/pkg/features"
+
+	"github.com/hashicorp/go-multierror"
 
 	meshapi "istio.io/api/mesh/v1alpha1"
 
@@ -81,7 +85,6 @@ func newNative(ctx resource.Context, cfg Config) (Instance, error) {
 		HTTPAddr:       ":0",
 		MonitoringAddr: ":0",
 		GrpcAddr:       ":0",
-		SecureGrpcAddr: ":0",
 	}
 
 	tmpMesh := mesh.DefaultMeshConfig()
@@ -89,25 +92,35 @@ func newNative(ctx resource.Context, cfg Config) (Instance, error) {
 	if cfg.MeshConfig != nil {
 		m = cfg.MeshConfig
 	}
+	m.AccessLogFile = "/var/log/istio/access.log"
+	// The local tests will use SDS, so we need to override the mesh to specify the UDS path
+	// TODO(howardjohn) should we make this mesh wide default?
+	m.SdsUdsPath = "unix:/etc/istio/proxy/SDS"
 
-	bootstrapArgs := bootstrap.PilotArgs{
-		Namespace:        e.SystemNamespace,
-		DiscoveryOptions: options,
-		Config: bootstrap.ConfigArgs{
+	if cfg.ServiceArgs.Registries == nil {
+		cfg.ServiceArgs = bootstrap.ServiceArgs{
+			// A ServiceEntry registry is added by default, which is what we want. Don't include any other registries.
+			Registries: []string{},
+		}
+	}
+
+	bootstrapArgs := bootstrap.NewPilotArgs(func(p *bootstrap.PilotArgs) {
+		p.Namespace = e.SystemNamespace
+		p.DiscoveryOptions = options
+		p.Config = bootstrap.ConfigArgs{
 			ControllerOptions: controller.Options{
 				DomainSuffix: e.Domain,
 			},
-		},
-		MeshConfig: m,
+		}
+		p.MeshConfig = m
+
 		// Use the config store for service entries as well.
-		Service: bootstrap.ServiceArgs{
-			// A ServiceEntry registry is added by default, which is what we want. Don't include any other registries.
-			Registries: []string{},
-		},
+		p.Service = cfg.ServiceArgs
+
 		// Include all of the default plugins for integration with Mixer, etc.
-		Plugins:   bootstrap.DefaultPlugins,
-		ForceStop: true,
-	}
+		p.Plugins = bootstrap.DefaultPlugins
+		p.ForceStop = true
+	})
 
 	if bootstrapArgs.MeshConfig == nil {
 		bootstrapArgs.MeshConfig = &meshapi.MeshConfig{}
@@ -120,8 +133,16 @@ func newNative(ctx resource.Context, cfg Config) (Instance, error) {
 		Address: galleyHostPort,
 	})
 
-	bootstrapArgs.MCPMaxMessageSize = bootstrap.DefaultMCPMaxMsgSize
+	bootstrapArgs.MCPOptions.MaxMessageSize = 1024 * 1024 * 4
 
+	// Use testing certs
+	if err := os.Setenv(bootstrap.LocalCertDir.Name, path.Join(env.IstioSrc, "tests/testdata/certs/pilot")); err != nil {
+		return nil, err
+	}
+	// TODO make this the default instead of feature flag, replace with standard configuration for address/port
+	if err := os.Setenv(features.IstiodService.Name, "istiod.istio-system.svc:0"); err != nil {
+		return nil, err
+	}
 	var err error
 	// Create the server for the discovery service.
 	if instance.server, err = bootstrap.NewServer(bootstrapArgs); err != nil {
@@ -134,7 +155,7 @@ func newNative(ctx resource.Context, cfg Config) (Instance, error) {
 	}
 
 	time.Sleep(1 * time.Second)
-	if instance.client, err = newClient(instance.server.GRPCListeningAddr.(*net.TCPAddr)); err != nil {
+	if instance.client, err = newClient(instance.server.GRPCListener.Addr().(*net.TCPAddr)); err != nil {
 		return nil, err
 	}
 
@@ -163,10 +184,10 @@ func (c *nativeComponent) Close() (err error) {
 
 // GetDiscoveryAddress gets the discovery address for pilot.
 func (c *nativeComponent) GetDiscoveryAddress() *net.TCPAddr {
-	return c.server.GRPCListeningAddr.(*net.TCPAddr)
+	return c.server.GRPCListener.Addr().(*net.TCPAddr)
 }
 
 // GetSecureDiscoveryAddress gets the discovery address for pilot.
 func (c *nativeComponent) GetSecureDiscoveryAddress() *net.TCPAddr {
-	return c.server.SecureGRPCListeningAddr.(*net.TCPAddr)
+	return c.server.GRPCDNSListener.Addr().(*net.TCPAddr)
 }

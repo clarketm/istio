@@ -23,14 +23,43 @@ import (
 	core "github.com/envoyproxy/go-control-plane/envoy/api/v2/core"
 	"github.com/golang/protobuf/ptypes/wrappers"
 
-	meshconfig "istio.io/api/mesh/v1alpha1"
+	"istio.io/api/networking/v1alpha3"
 	"istio.io/istio/pilot/pkg/networking/util"
 )
+
+func GetLocalityLbSetting(
+	mesh *v1alpha3.LocalityLoadBalancerSetting,
+	destrule *v1alpha3.LocalityLoadBalancerSetting,
+) *v1alpha3.LocalityLoadBalancerSetting {
+	var enabled bool
+	// Locality lb is enabled if its not explicitly disabled in mesh global config
+	if mesh != nil && (mesh.Enabled == nil || mesh.Enabled.Value) {
+		enabled = true
+	}
+	// Unless we explicitly override this in destination rule
+	if destrule != nil {
+		if destrule.Enabled != nil && !destrule.Enabled.Value {
+			enabled = false
+		} else {
+			enabled = true
+		}
+	}
+	if !enabled {
+		return nil
+	}
+
+	// Destination Rule overrides mesh config. If its defined, use that
+	if destrule != nil {
+		return destrule
+	}
+	// Otherwise fall back to mesh default
+	return mesh
+}
 
 func ApplyLocalityLBSetting(
 	locality *core.Locality,
 	loadAssignment *apiv2.ClusterLoadAssignment,
-	localityLB *meshconfig.LocalityLoadBalancerSetting,
+	localityLB *v1alpha3.LocalityLoadBalancerSetting,
 	enableFailover bool,
 ) {
 	if locality == nil || loadAssignment == nil {
@@ -40,8 +69,9 @@ func ApplyLocalityLBSetting(
 	// one of Distribute or Failover settings can be applied.
 	if localityLB.GetDistribute() != nil {
 		applyLocalityWeight(locality, loadAssignment, localityLB.GetDistribute())
-	} else if enableFailover {
 		// Failover needs outlier detection, otherwise Envoy will never drop down to a lower priority.
+		// Do not apply default failover when locality LB is disabled.
+	} else if enableFailover && (localityLB.Enabled == nil || localityLB.Enabled.Value) {
 		applyLocalityFailover(locality, loadAssignment, localityLB.GetFailover())
 	}
 }
@@ -50,13 +80,13 @@ func ApplyLocalityLBSetting(
 func applyLocalityWeight(
 	locality *core.Locality,
 	loadAssignment *apiv2.ClusterLoadAssignment,
-	distribute []*meshconfig.LocalityLoadBalancerSetting_Distribute) {
+	distribute []*v1alpha3.LocalityLoadBalancerSetting_Distribute) {
 	if distribute == nil {
 		return
 	}
 
 	// Support Locality weighted load balancing
-	// (https://www.envoyproxy.io/docs/envoy/latest/intro/arch_overview/load_balancing/locality_weight.html)
+	// (https://www.envoyproxy.io/docs/envoy/latest/intro/arch_overview/upstream/load_balancing/locality_weight#locality-weighted-load-balancing)
 	// by providing weights in LocalityLbEndpoints via load_balancing_weight.
 	// By setting weights across different localities, it can allow
 	// Envoy to weight assignments across different zones and geographical locations.
@@ -87,9 +117,11 @@ func applyLocalityWeight(
 				// in case wildcard dest matching multi groups of endpoints
 				// the load balancing weight for a locality is divided by the sum of the weights of all localities
 				for index, originalWeight := range destLocMap {
-					weight := float64(originalWeight*weight) / float64(totalWeight)
-					loadAssignment.Endpoints[index].LoadBalancingWeight = &wrappers.UInt32Value{
-						Value: uint32(math.Ceil(weight)),
+					destWeight := float64(originalWeight*weight) / float64(totalWeight)
+					if destWeight > 0 {
+						loadAssignment.Endpoints[index].LoadBalancingWeight = &wrappers.UInt32Value{
+							Value: uint32(math.Ceil(destWeight)),
+						}
 					}
 				}
 			}
@@ -107,7 +139,7 @@ func applyLocalityWeight(
 func applyLocalityFailover(
 	locality *core.Locality,
 	loadAssignment *apiv2.ClusterLoadAssignment,
-	failover []*meshconfig.LocalityLoadBalancerSetting_Failover) {
+	failover []*v1alpha3.LocalityLoadBalancerSetting_Failover) {
 	// key is priority, value is the index of the LocalityLbEndpoints in ClusterLoadAssignment
 	priorityMap := map[int][]int{}
 

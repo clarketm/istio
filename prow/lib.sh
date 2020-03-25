@@ -14,6 +14,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Cluster names for multicluster configurations.
+export CLUSTER1_NAME=${CLUSTER1_NAME:-"cluster1"}
+export CLUSTER2_NAME=${CLUSTER2_NAME:-"cluster2"}
+export CLUSTER3_NAME=${CLUSTER3_NAME:-"cluster3"}
+
+export CLUSTER_NAMES=("${CLUSTER1_NAME}" "${CLUSTER2_NAME}" "${CLUSTER3_NAME}")
+export CLUSTER_POD_SUBNETS=(10.10.0.0/16 10.20.0.0/16 10.30.0.0/16)
 
 function setup_gcloud_credentials() {
   if [[ $(command -v gcloud) ]]; then
@@ -63,9 +70,10 @@ function download_untar_istio_release() {
 
 function build_images() {
   # Build just the images needed for tests
-  for image in pilot proxyv2 app test_policybackend mixer citadel galley sidecar_injector kubectl node-agent-k8s; do
-     DOCKER_BUILD_VARIANTS="${VARIANT:-default}" make docker.${image}
-  done
+  targets="docker.pilot docker.proxyv2 "
+  targets+="docker.app docker.test_policybackend "
+  targets+="docker.mixer docker.galley "
+  DOCKER_BUILD_VARIANTS="${VARIANT:-default}" DOCKER_TARGETS="${targets}" make dockerx
 }
 
 function kind_load_images() {
@@ -77,59 +85,27 @@ function kind_load_images() {
   for i in {1..3}; do
     # Archived local images and load it into KinD's docker daemon
     # Kubernetes in KinD can only access local images from its docker daemon.
-    docker images "${hub}/*:${TAG}" --format '{{.Repository}}:{{.Tag}}' | xargs -n1 kind --loglevel debug --name "${NAME}" load docker-image && break
-    echo "Attempt ${i} to load images failed, retrying in 5s..."
-    sleep 5
+    docker images "${hub}/*:${TAG}" --format '{{.Repository}}:{{.Tag}}' | xargs -n1 kind -v9 --name "${NAME}" load docker-image && break
+    echo "Attempt ${i} to load images failed, retrying in 1s..."
+    sleep 1
 	done
 
   # If a variant is specified, load those images as well.
   # We should still load non-variant images as well for things like `app` which do not use variants
   if [[ "${VARIANT:-}" != "" ]]; then
     for i in {1..3}; do
-      docker images "${hub}/*:${TAG}-${VARIANT}" --format '{{.Repository}}:{{.Tag}}' | xargs -n1 kind --loglevel debug --name "${NAME}" load docker-image && break
-      echo "Attempt ${i} to load images failed, retrying in 5s..."
-      sleep 5
+      docker images "${hub}/*:${TAG}-${VARIANT}" --format '{{.Repository}}:{{.Tag}}' | xargs -n1 kind -v9 --name "${NAME}" load docker-image && break
+      echo "Attempt ${i} to load images failed, retrying in 1s..."
+      sleep 1
     done
   fi
 }
 
-# Cleanup e2e resources.
-function cleanup() {
-  if [[ "${CLEAN_CLUSTERS}" == "True" ]]; then
-    unsetup_clusters
-  fi
-  if [[ "${USE_MASON_RESOURCE}" == "True" ]]; then
-    mason_cleanup
-    cat "${FILE_LOG}"
-  fi
-}
-
-# Set up a GKE cluster for testing.
-function setup_e2e_cluster() {
-  WD=$(dirname "$0")
-  WD=$(cd "$WD" || exit; pwd)
-  ROOT=$(dirname "$WD")
-
-  # shellcheck source=prow/mason_lib.sh
-  source "${ROOT}/prow/mason_lib.sh"
-  # shellcheck source=prow/cluster_lib.sh
-  source "${ROOT}/prow/cluster_lib.sh"
-
-  trap cleanup EXIT
-
-  if [[ "${USE_MASON_RESOURCE}" == "True" ]]; then
-    INFO_PATH="$(mktemp /tmp/XXXXX.boskos.info)"
-    FILE_LOG="$(mktemp /tmp/XXXXX.boskos.log)"
-    OWNER=${OWNER:-"e2e"}
-    E2E_ARGS+=("--mason_info=${INFO_PATH}")
-
-    setup_and_export_git_sha
-
-    get_resource "${RESOURCE_TYPE}" "${OWNER}" "${INFO_PATH}" "${FILE_LOG}"
-  else
-    export GIT_SHA="${GIT_SHA:-$TAG}"
-  fi
-  setup_cluster
+# Loads images into all clusters.
+function kind_load_images_on_clusters() {
+  for c in "${CLUSTER_NAMES[@]}"; do
+     time kind_load_images "${c}"
+  done
 }
 
 function clone_cni() {
@@ -145,20 +121,28 @@ function clone_cni() {
 function cleanup_kind_cluster() {
   NAME="${1}"
   echo "Test exited with exit code $?."
-  kind export logs --name "${NAME}" "${ARTIFACTS}/kind" --loglevel debug || true
+  kind export logs --name "${NAME}" "${ARTIFACTS}/kind" -v9 || true
   if [[ -z "${SKIP_CLEANUP:-}" ]]; then
     echo "Cleaning up kind cluster"
-    kind delete cluster --name "${NAME}" --loglevel debug || true
+    kind delete cluster --name "${NAME}" -v9 || true
   fi
 }
 
+# Cleans up the clusters created by setup_kind_clusters
+function cleanup_kind_clusters() {
+  for c in "${CLUSTER_NAMES[@]}"; do
+     cleanup_kind_cluster "${c}"
+  done
+}
+
 function setup_kind_cluster() {
-  IMAGE="${1:-}"
-  NAME="${2:-istio-testing}"
-  CONFIG="${3:-}"
-  # Delete any previous e2e KinD cluster
+  IP_FAMILY="${1:-ipv4}"
+  IMAGE="${2:-kindest/node:v1.17.0}"
+  NAME="${3:-istio-testing}"
+  CONFIG="${4:-}"
+  # Delete any previous KinD cluster
   echo "Deleting previous KinD cluster with name=${NAME}"
-  if ! (kind delete cluster --name="${NAME}") > /dev/null; then
+  if ! (kind delete cluster --name="${NAME}" -v9) > /dev/null; then
     echo "No existing kind cluster with name ${NAME}. Continue..."
   fi
 
@@ -177,21 +161,100 @@ function setup_kind_cluster() {
       # Kubernetes 1.13, 1.14
       CONFIG=./prow/config/trustworthy-jwt-13-14.yaml
     else
-      # Kubernetes 1.15
+      # Kubernetes 1.15+
       CONFIG=./prow/config/trustworthy-jwt.yaml
+    fi
+      # Configure the cluster IP Family only for default configs
+    if [ "${IP_FAMILY}" = "ipv6" ]; then
+      cat <<EOF >> "${CONFIG}"
+networking:
+  ipFamily: ipv6
+EOF
     fi
   fi
 
   # Create KinD cluster
-  if ! (kind create cluster --name="${NAME}" --config "${CONFIG}" --loglevel debug --retain --image "${IMAGE}" --wait=60s); then
+  if ! (kind create cluster --name="${NAME}" --config "${CONFIG}" -v9 --retain --image "${IMAGE}" --wait=60s); then
     echo "Could not setup KinD environment. Something wrong with KinD setup. Exporting logs."
     exit 1
   fi
 
-  KUBECONFIG="$(kind get kubeconfig-path --name="${NAME}")"
-  export KUBECONFIG
-
   kubectl apply -f ./prow/config/metrics
+}
+
+# Sets up 3 kind clusters. Clusters 1 and 2 are configured for direct pod-to-pod traffic across
+# clusters, while cluster 3 is left on a separate network.
+function setup_kind_clusters() {
+  TOPOLOGY="${1}"
+  IMAGE="${2}"
+
+  KUBECONFIG_DIR="$(mktemp -d)"
+
+  # Trap replaces any previous trap's, so we need to explicitly cleanup both clusters here
+  trap cleanup_kind_clusters EXIT
+
+  for i in "${!CLUSTER_NAMES[@]}"; do
+    CLUSTER_NAME="${CLUSTER_NAMES[$i]}"
+    CLUSTER_POD_SUBNET="${CLUSTER_POD_SUBNETS[$i]}"
+    CLUSTER_YAML="${ARTIFACTS}/config-${CLUSTER_NAME}.yaml"
+    cat <<EOF > "${CLUSTER_YAML}"
+      kind: Cluster
+      apiVersion: kind.sigs.k8s.io/v1alpha3
+      networking:
+        podSubnet: ${CLUSTER_POD_SUBNET}
+        serviceSubnet: 10.255.10.0/24
+EOF
+
+    CLUSTER_KUBECONFIG="${KUBECONFIG_DIR}/${CLUSTER_NAME}"
+
+    # Create the clusters.
+    # TODO: add IPv6
+    KUBECONFIG="${CLUSTER_KUBECONFIG}" setup_kind_cluster "ipv4" "${IMAGE}" "${CLUSTER_NAME}" "${CLUSTER_YAML}"
+  done
+
+  # Export variables for the kube configs for the clusters.
+  export CLUSTER1_KUBECONFIG="${KUBECONFIG_DIR}/${CLUSTER1_NAME}"
+  export CLUSTER2_KUBECONFIG="${KUBECONFIG_DIR}/${CLUSTER2_NAME}"
+  export CLUSTER3_KUBECONFIG="${KUBECONFIG_DIR}/${CLUSTER3_NAME}"
+  CLUSTER_KUBECONFIGS=("$CLUSTER1_KUBECONFIG" "$CLUSTER2_KUBECONFIG" "$CLUSTER3_KUBECONFIG")
+
+  if [[ "${TOPOLOGY}" == "MULTICLUSTER_SINGLE_NETWORK" ]]; then
+    # Allow direct access between all clusters.
+    for i in "${!CLUSTER_NAMES[@]}"; do
+      CLUSTERI_NAME="${CLUSTER_NAMES[$i]}"
+      CLUSTERI_KUBECONFIG="${CLUSTER_KUBECONFIGS[$i]}"
+
+      for j in "${!CLUSTER_NAMES[@]}"; do
+        CLUSTERJ_NAME="${CLUSTER_NAMES[$j]}"
+        CLUSTERJ_KUBECONFIG="${CLUSTER_KUBECONFIGS[$j]}"
+
+        if [ "$j" -gt "$i" ]; then
+          connect_kind_clusters "${CLUSTERI_NAME}" "${CLUSTERI_KUBECONFIG}" "${CLUSTERJ_NAME}" "${CLUSTERJ_KUBECONFIG}"
+        fi
+      done
+    done
+  else
+    # Connect clusters 1 and 2, but leave cluster 3 on a separate network.
+    connect_kind_clusters "${CLUSTER1_NAME}" "${CLUSTER1_KUBECONFIG}" "${CLUSTER2_NAME}" "${CLUSTER2_KUBECONFIG}"
+  fi
+
+}
+
+function connect_kind_clusters() {
+  C1="${1}"
+  C1_KUBECONFIG="${2}"
+  C2="${3}"
+  C2_KUBECONFIG="${4}"
+
+  # Set up routing rules for inter-cluster direct pod to pod communication
+  C1_NODE="${C1}-control-plane"
+  C2_NODE="${C2}-control-plane"
+  C1_DOCKER_IP=$(docker inspect -f "{{ .NetworkSettings.IPAddress }}" "${C1_NODE}")
+  C2_DOCKER_IP=$(docker inspect -f "{{ .NetworkSettings.IPAddress }}" "${C2_NODE}")
+  C1_POD_CIDR=$(KUBECONFIG="${C1_KUBECONFIG}" kubectl get node -ojsonpath='{.items[0].spec.podCIDR}')
+  C2_POD_CIDR=$(KUBECONFIG="${C2_KUBECONFIG}" kubectl get node -ojsonpath='{.items[0].spec.podCIDR}')
+  docker exec "${C1_NODE}" ip route add "${C2_POD_CIDR}" via "${C2_DOCKER_IP}"
+  docker exec "${C2_NODE}" ip route add "${C1_POD_CIDR}" via "${C1_DOCKER_IP}"
 }
 
 function cni_run_daemon_kind() {

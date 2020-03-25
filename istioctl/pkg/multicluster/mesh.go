@@ -21,7 +21,6 @@ import (
 
 	"github.com/ghodss/yaml"
 	"github.com/spf13/cobra"
-	"k8s.io/apimachinery/pkg/types"
 )
 
 // MeshDesc describes the topology of a multi-cluster mesh. The clustersByContext in the mesh reference the active
@@ -30,9 +29,9 @@ type MeshDesc struct {
 	// Mesh Identifier.
 	MeshID string `json:"mesh_id,omitempty"`
 
-	// Collection of clustersByContext in the multi-cluster mesh. Clusters are indexed by Context name and
-	// reference clustersByContext defined in the Kubeconfig following kubectl precedence rules.
-	Clusters map[string]ClusterDesc `json:"clusters,omitempty"`
+	// Collection of clusters in the multi-cluster mesh. Clusters are indexed by context name and
+	// reference clusters defined in the Kubeconfig following kubectl precedence rules.
+	Clusters map[string]ClusterDesc `json:"contexts,omitempty"`
 }
 
 // ClusterDesc describes attributes of a cluster and the desired state of joining the mesh.
@@ -52,11 +51,11 @@ type ClusterDesc struct {
 
 func (m *Mesh) addCluster(c *Cluster) {
 	m.clustersByContext[c.Context] = c
-	m.clustersByUID[c.uid] = c
+	m.clustersByClusterName[c.clusterName] = c
 }
 
-func (m *Mesh) ClusterByUID(uid types.UID) (*Cluster, bool) {
-	c, ok := m.clustersByUID[uid]
+func (m *Mesh) ClusterByClusterName(name string) (*Cluster, bool) {
+	c, ok := m.clustersByClusterName[name]
 	return c, ok
 }
 
@@ -71,15 +70,15 @@ func (m *Mesh) SortedClusters() []*Cluster {
 		sortedClusters = append(sortedClusters, other)
 	}
 	sort.Slice(sortedClusters, func(i, j int) bool {
-		return strings.Compare(string(sortedClusters[i].uid), string(sortedClusters[j].uid)) < 0
+		return strings.Compare(sortedClusters[i].clusterName, sortedClusters[j].clusterName) < 0
 	})
 	return sortedClusters
 }
 
 type Mesh struct {
-	meshID            string
-	clustersByContext map[string]*Cluster // by Context
-	clustersByUID     map[types.UID]*Cluster
+	meshID                string
+	clustersByContext     map[string]*Cluster // by Context
+	clustersByClusterName map[string]*Cluster
 }
 
 func LoadMeshDesc(filename string, env Environment) (*MeshDesc, error) {
@@ -96,9 +95,9 @@ func LoadMeshDesc(filename string, env Environment) (*MeshDesc, error) {
 
 func NewMesh(md *MeshDesc, clusters ...*Cluster) *Mesh {
 	mesh := &Mesh{
-		meshID:            md.MeshID,
-		clustersByContext: make(map[string]*Cluster),
-		clustersByUID:     make(map[types.UID]*Cluster),
+		meshID:                md.MeshID,
+		clustersByContext:     make(map[string]*Cluster),
+		clustersByClusterName: make(map[string]*Cluster),
 	}
 	for _, cluster := range clusters {
 		mesh.addCluster(cluster)

@@ -24,11 +24,11 @@ import (
 	"google.golang.org/grpc"
 
 	istioMixerV1 "istio.io/api/mixer/v1"
+
 	"istio.io/istio/mixer/adapter"
 	"istio.io/istio/mixer/pkg/server"
 	generatedTmplRepo "istio.io/istio/mixer/template"
 	"istio.io/istio/pkg/test"
-	"istio.io/istio/pkg/test/deployment"
 	"istio.io/istio/pkg/test/framework/components/environment/native"
 	"istio.io/istio/pkg/test/framework/components/galley"
 	"istio.io/istio/pkg/test/framework/resource"
@@ -77,15 +77,6 @@ func newNative(ctx resource.Context, config Config) (Instance, error) {
 	}()
 
 	n.client.workdir, err = ctx.CreateTmpDirectory("mixer")
-	if err != nil {
-		return nil, err
-	}
-
-	helmExtractDir, err := ctx.CreateTmpDirectory("helm-mixer-attribute-extract")
-	if err != nil {
-		return nil, err
-	}
-	n.client.attributeManifest, err = deployment.ExtractAttributeManifest(helmExtractDir)
 	if err != nil {
 		return nil, err
 	}

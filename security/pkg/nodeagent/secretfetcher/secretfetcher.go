@@ -75,7 +75,7 @@ var (
 	secretControllerResyncPeriod = env.RegisterStringVar("SECRET_WATCHER_RESYNC_PERIOD", "", "").Get()
 	// ingressFallbackSecret specifies the name of fallback secret for ingress gateway.
 	ingressFallbackSecret = env.RegisterStringVar("INGRESS_GATEWAY_FALLBACK_SECRET", "gateway-fallback", "").Get()
-	secretFetcherLog      = log.RegisterScope("secretFetcherLog", "secret fetcher debugging", 0)
+	secretFetcherLog      = log.RegisterScope("secretfetcher", "secret fetcher debugging", 0)
 )
 
 // SecretFetcher fetches secret via watching k8s secrets or sending CSR to CA.
@@ -156,7 +156,11 @@ var namespaceVar = env.RegisterStringVar(ingressSecretNamespace, "", "")
 
 // InitWithKubeClient initializes SecretFetcher to watch kubernetes secrets.
 func (sf *SecretFetcher) InitWithKubeClient(core corev1.CoreV1Interface) { // nolint:interfacer
-	namespace := namespaceVar.Get()
+	sf.InitWithKubeClientAndNs(core, namespaceVar.Get())
+}
+
+// InitWithKubeClientAndNs initializes SecretFetcher to watch kubernetes secrets.
+func (sf *SecretFetcher) InitWithKubeClientAndNs(core corev1.CoreV1Interface, namespace string) { // nolint:interfacer
 	istioSecretSelector := fields.SelectorFromSet(nil).String()
 	scrtLW := &cache.ListWatch{
 		ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
@@ -463,7 +467,6 @@ func (sf *SecretFetcher) updateSecretInCache(oldScrt, newScrt *model.SecretItem)
 // shouldUpdateSecret indicates whether secret update is required to reload new secret.
 func shouldUpdateSecret(oldScrt, oldCaScrt, newScrt, newCaScrt *model.SecretItem) bool {
 	if newScrt == nil && newCaScrt == nil {
-		secretFetcherLog.Warnf("Secret object: %v has empty field, skip update", oldScrt.ResourceName)
 		return false
 	}
 

@@ -16,31 +16,40 @@ package mtls
 
 import (
 	"bytes"
+	"fmt"
 	"testing"
 
 	"github.com/ghodss/yaml"
+	"github.com/gogo/protobuf/jsonpb"
 
-	"github.com/golang/protobuf/jsonpb"
+	"istio.io/istio/pkg/config/resource"
 
-	"istio.io/istio/security/proto/authentication/v1alpha1"
+	"istio.io/api/authentication/v1alpha1"
 )
 
 func TestMTLSPolicyChecker_singleResource(t *testing.T) {
 	type PolicyResource struct {
-		namespace string
+		namespace resource.Namespace
 		policy    string
 	}
 
+	type PortNameMapping struct {
+		fqdn   string
+		name   string
+		number uint32
+	}
+
 	tests := map[string]struct {
-		meshPolicy string
-		policy     PolicyResource
-		service    TargetService
-		want       bool
+		meshPolicy       string
+		portNameMappings []PortNameMapping
+		policy           PolicyResource
+		service          TargetService
+		want             Mode
 	}{
 		"no policies means no strict mtls": {
 			// Note no policies specified
 			service: NewTargetServiceWithPortNumber("foobar.my-namespace.svc.cluster.local", 8080),
-			want:    false,
+			want:    ModePlaintext,
 		},
 		"service specific policy": {
 			policy: PolicyResource{
@@ -55,7 +64,7 @@ peers:
 `,
 			},
 			service: NewTargetServiceWithPortNumber("foobar.my-namespace.svc.cluster.local", 8080),
-			want:    true,
+			want:    ModeStrict,
 		},
 		"service specific policy uses only the first mtls configuration found": {
 			policy: PolicyResource{
@@ -73,9 +82,16 @@ peers:
 `,
 			},
 			service: NewTargetServiceWithPortNumber("foobar.my-namespace.svc.cluster.local", 8080),
-			want:    false,
+			want:    ModePermissive,
 		},
 		"service specific policy using port name": {
+			portNameMappings: []PortNameMapping{
+				{
+					fqdn:   "foobar.my-namespace.svc.cluster.local",
+					name:   "https",
+					number: 8080,
+				},
+			},
 			policy: PolicyResource{
 
 				namespace: "my-namespace",
@@ -88,8 +104,8 @@ peers:
 - mtls:
 `,
 			},
-			service: NewTargetServiceWithPortName("foobar.my-namespace.svc.cluster.local", "https"),
-			want:    true,
+			service: NewTargetServiceWithPortNumber("foobar.my-namespace.svc.cluster.local", 8080),
+			want:    ModeStrict,
 		},
 		"non-matching host service specific policy": {
 			policy: PolicyResource{
@@ -105,7 +121,7 @@ peers:
 `,
 			},
 			service: NewTargetServiceWithPortNumber("foobar.my-namespace.svc.cluster.local", 8080),
-			want:    false,
+			want:    ModePlaintext,
 		},
 		"non-matching namespace service specific policy": {
 			policy: PolicyResource{
@@ -120,7 +136,7 @@ peers:
 `,
 			},
 			service: NewTargetServiceWithPortNumber("foobar.my-namespace.svc.cluster.local", 8080),
-			want:    false,
+			want:    ModePlaintext,
 		},
 		"policy matches service but is not strict": {
 			policy: PolicyResource{
@@ -137,7 +153,7 @@ peers:
 `,
 			},
 			service: NewTargetServiceWithPortNumber("foobar.my-namespace.svc.cluster.local", 8080),
-			want:    false,
+			want:    ModePermissive,
 		},
 		"policy matches service but uses deprecated field": {
 			policy: PolicyResource{
@@ -155,7 +171,7 @@ peers:
 `,
 			},
 			service: NewTargetServiceWithPortNumber("foobar.my-namespace.svc.cluster.local", 8080),
-			want:    false,
+			want:    ModePermissive,
 		},
 		"policy matches service but peer is optional": {
 			policy: PolicyResource{
@@ -173,7 +189,7 @@ peerIsOptional: true
 `,
 			},
 			service: NewTargetServiceWithPortNumber("foobar.my-namespace.svc.cluster.local", 8080),
-			want:    false,
+			want:    ModePermissive,
 		},
 		"policy matches service but does not use mtls": {
 			policy: PolicyResource{
@@ -189,7 +205,7 @@ peers:
 `,
 			},
 			service: NewTargetServiceWithPortNumber("foobar.my-namespace.svc.cluster.local", 8080),
-			want:    false,
+			want:    ModePlaintext,
 		},
 		"policy matches every port on service": {
 			policy: PolicyResource{
@@ -203,7 +219,7 @@ peers:
 `,
 			},
 			service: NewTargetServiceWithPortNumber("foobar.my-namespace.svc.cluster.local", 8080),
-			want:    true,
+			want:    ModeStrict,
 		},
 		"policy matches every service in namespace": {
 			policy: PolicyResource{
@@ -214,7 +230,7 @@ peers:
 `,
 			},
 			service: NewTargetServiceWithPortNumber("foobar.my-namespace.svc.cluster.local", 8080),
-			want:    true,
+			want:    ModeStrict,
 		},
 		"policy matches entire mesh": {
 			meshPolicy: `
@@ -222,20 +238,32 @@ peers:
 - mtls:
 `,
 			service: NewTargetServiceWithPortNumber("foobar.my-namespace.svc.cluster.local", 8080),
-			want:    true,
+			want:    ModeStrict,
 		},
 	}
 
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			pc := NewPolicyChecker()
+			fqdnToPortNameToNumber := make(map[string]map[string]uint32)
+			for _, portMapping := range tc.portNameMappings {
+				if _, ok := fqdnToPortNameToNumber[portMapping.fqdn]; !ok {
+					fqdnToPortNameToNumber[portMapping.fqdn] = make(map[string]uint32)
+				}
+
+				fqdnToPortNameToNumber[portMapping.fqdn][portMapping.name] = portMapping.number
+			}
+
+			pc := NewPolicyChecker(fqdnToPortNameToNumber)
 
 			if tc.meshPolicy != "" {
 				meshpb, err := yAMLToPolicy(tc.meshPolicy)
 				if err != nil {
 					t.Fatalf("expected: %v, got error when parsing yaml: %v", tc.want, err)
 				}
-				pc.AddMeshPolicy(meshpb)
+				r := resource.Instance{Metadata: resource.Metadata{FullName: resource.NewFullName("", "default")}}
+				if err := pc.AddMeshPolicy(&r, meshpb); err != nil {
+					t.Fatal(err)
+				}
 			}
 
 			if tc.policy.policy != "" {
@@ -243,16 +271,18 @@ peers:
 				if err != nil {
 					t.Fatalf("expected: %v, got error when parsing yaml: %v", tc.want, err)
 				}
-				err = pc.AddPolicy(tc.policy.namespace, pb)
+				r := resource.Instance{Metadata: resource.Metadata{FullName: resource.NewFullName(tc.policy.namespace, "somePolicy")}}
+				err = pc.AddPolicy(&r, pb)
 				if err != nil {
 					t.Fatalf("expected: %v, got error when adding policy: %v", tc.want, err)
 				}
 			}
 
-			got, err := pc.IsServiceMTLSEnforced(tc.service)
+			mr, err := pc.IsServiceMTLSEnforced(tc.service)
 			if err != nil {
 				t.Fatalf("expected: %v, got error: %v", tc.want, err)
 			}
+			got := mr.MTLSMode
 			if got != tc.want {
 				t.Fatalf("expected: %v, got: %v", tc.want, got)
 			}
@@ -262,15 +292,22 @@ peers:
 
 func TestMTLSPolicyChecker_multipleResources(t *testing.T) {
 	type PolicyResource struct {
-		namespace string
+		namespace resource.Namespace
 		policy    string
 	}
 
+	type PortNameMapping struct {
+		fqdn   string
+		name   string
+		number uint32
+	}
+
 	tests := map[string]struct {
-		meshPolicy string
-		policies   []PolicyResource
-		service    TargetService
-		want       bool
+		meshPolicy       string
+		portNameMappings []PortNameMapping
+		policies         []PolicyResource
+		service          TargetService
+		want             Mode
 	}{
 		"namespace policy overrides mesh policy": {
 			meshPolicy: `
@@ -292,7 +329,7 @@ peers:
 				},
 			},
 			service: NewTargetServiceWithPortNumber("foobar.my-namespace.svc.cluster.local", 8080),
-			want:    false,
+			want:    ModePermissive,
 		},
 		"service policy overrides namespace policy": {
 			policies: []PolicyResource{
@@ -318,7 +355,7 @@ peers:
 				},
 			},
 			service: NewTargetServiceWithPortNumber("foobar.my-namespace.svc.cluster.local", 8080),
-			want:    false,
+			want:    ModePermissive,
 		},
 		"port-specific policy overrides service-level policy": {
 			policies: []PolicyResource{
@@ -346,19 +383,31 @@ peers:
 				},
 			},
 			service: NewTargetServiceWithPortNumber("foobar.my-namespace.svc.cluster.local", 8080),
-			want:    false,
+			want:    ModePermissive,
 		},
 	}
 
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			pc := NewPolicyChecker()
+			fqdnToPortNameToNumber := make(map[string]map[string]uint32)
+			for _, portMapping := range tc.portNameMappings {
+				if _, ok := fqdnToPortNameToNumber[portMapping.fqdn]; !ok {
+					fqdnToPortNameToNumber[portMapping.fqdn] = make(map[string]uint32)
+				}
+
+				fqdnToPortNameToNumber[portMapping.fqdn][portMapping.name] = portMapping.number
+			}
+
+			pc := NewPolicyChecker(fqdnToPortNameToNumber)
 			// Add mesh policy, if it exists.
 			meshpb, err := yAMLToPolicy(tc.meshPolicy)
 			if err != nil {
 				t.Fatalf("expected: %v, got error when parsing yaml: %v", tc.want, err)
 			}
-			pc.AddMeshPolicy(meshpb)
+			r := resource.Instance{Metadata: resource.Metadata{FullName: resource.NewFullName("", "default")}}
+			if err := pc.AddMeshPolicy(&r, meshpb); err != nil {
+				t.Fatal(err)
+			}
 
 			// Add in all other policies
 			for _, p := range tc.policies {
@@ -366,16 +415,18 @@ peers:
 				if err != nil {
 					t.Fatalf("expected: %v, got error when parsing yaml: %v", tc.want, err)
 				}
-				err = pc.AddPolicy(p.namespace, pb)
+				r := resource.Instance{Metadata: resource.Metadata{FullName: resource.NewFullName(p.namespace, "somePolicy")}}
+				err = pc.AddPolicy(&r, pb)
 				if err != nil {
 					t.Fatalf("expected: %v, got error when adding policy: %v", tc.want, err)
 				}
 			}
 
-			got, err := pc.IsServiceMTLSEnforced(tc.service)
+			mr, err := pc.IsServiceMTLSEnforced(tc.service)
 			if err != nil {
 				t.Fatalf("expected: %v, got error: %v", tc.want, err)
 			}
+			got := mr.MTLSMode
 			if got != tc.want {
 				t.Fatalf("expected: %v, got: %v", tc.want, got)
 			}
@@ -386,12 +437,12 @@ peers:
 func yAMLToPolicy(yml string) (*v1alpha1.Policy, error) {
 	js, err := yaml.YAMLToJSON([]byte(yml))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("error translating yaml to json: %w", err)
 	}
 	var pb v1alpha1.Policy
 	err = jsonpb.Unmarshal(bytes.NewReader(js), &pb)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("error translating json to pb for json: %s, error: %w", string(js), err)
 	}
 
 	return &pb, nil

@@ -65,11 +65,11 @@ func TestWaitCmd(t *testing.T) {
 			execClientConfig: cannedResponseMap,
 			args:             strings.Split("x wait --timeout 2s virtual-service bar.default", " "),
 			wantException:    true,
-			expectedOutput:   "Error: timeout expired before resource virtual-service/default/bar became effective on all sidecars\n",
+			expectedOutput:   "Error: timeout expired before resource VirtualService/default/bar became effective on all sidecars\n",
 		},
 		{
 			execClientConfig: cannedResponseMap,
-			args:             strings.Split("x wait --timeout 2s virtual-service foo.default", " "),
+			args:             strings.Split("x wait --timeout 2s virtualservice foo.default", " "),
 			wantException:    false,
 		},
 	}

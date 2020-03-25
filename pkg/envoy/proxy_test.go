@@ -33,12 +33,9 @@ func TestEnvoyArgs(t *testing.T) {
 		LogLevel:          "trace",
 		ComponentLogLevel: "misc:error",
 		NodeIPs:           []string{"10.75.2.9", "192.168.11.18"},
-		DNSRefreshRate:    "60s",
 		PodName:           "",
 		PodNamespace:      "",
 		PodIP:             nil,
-		SDSUDSPath:        "udspath",
-		SDSTokenPath:      "tokenpath",
 	}
 
 	test := &envoy{

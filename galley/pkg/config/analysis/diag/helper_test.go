@@ -14,12 +14,25 @@
 
 package diag
 
-type testOrigin string
+import (
+	"istio.io/istio/pkg/config/resource"
+)
 
-func (o testOrigin) FriendlyName() string {
-	return string(o)
+var _ resource.Origin = &testOrigin{}
+
+type testOrigin struct {
+	name string
+	ref  string
 }
 
-func (o testOrigin) Namespace() string {
+func (o testOrigin) FriendlyName() string {
+	return o.name
+}
+
+func (o testOrigin) Namespace() resource.Namespace {
 	return ""
+}
+
+func (o testOrigin) Reference() string {
+	return o.ref
 }

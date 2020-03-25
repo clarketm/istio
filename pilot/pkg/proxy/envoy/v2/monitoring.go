@@ -16,6 +16,8 @@ package v2
 import (
 	"google.golang.org/grpc/codes"
 
+	"istio.io/istio/pilot/pkg/model"
+
 	"istio.io/istio/pkg/mcp/status"
 	"istio.io/pkg/monitoring"
 )
@@ -28,7 +30,7 @@ var (
 
 	cdsReject = monitoring.NewGauge(
 		"pilot_xds_cds_reject",
-		"Pilot rejected CSD configs.",
+		"Pilot rejected CDS configs.",
 		monitoring.WithLabels(nodeTag, errTag),
 	)
 
@@ -127,6 +129,12 @@ var (
 		[]float64{.1, 1, 3, 5, 10, 20, 30},
 	)
 
+	pushTriggers = monitoring.NewSum(
+		"pilot_push_triggers",
+		"Total number of times a push was triggered, labeled by reason for the push.",
+		monitoring.WithLabels(typeTag),
+	)
+
 	// only supported dimension is millis, unfortunately. default to unitdimensionless.
 	proxiesConvergeDelay = monitoring.NewDistribution(
 		"pilot_proxy_convergence_time",
@@ -156,11 +164,18 @@ var (
 	inboundServiceDeletes = inboundUpdates.With(typeTag.Value("svcdelete"))
 )
 
+func recordPushTriggers(reasons ...model.TriggerReason) {
+	for _, r := range reasons {
+		pushTriggers.With(typeTag.Value(string(r))).Increment()
+	}
+}
+
 func recordSendError(metric monitoring.Metric, err error) {
 	s, ok := status.FromError(err)
-	// Unavailable code will be sent when a connection is closing down. This is very normal,
+	// Unavailable or canceled code will be sent when a connection is closing down. This is very normal,
 	// due to the XDS connection being dropped every 30 minutes, or a pod shutting down.
-	if !ok || s.Code() != codes.Unavailable {
+	isError := s.Code() != codes.Unavailable && s.Code() != codes.Canceled
+	if !ok || isError {
 		metric.Increment()
 	}
 }
@@ -177,6 +192,7 @@ func init() {
 		ldsReject,
 		rdsReject,
 		edsInstances,
+		edsAllLocalityEndpoints,
 		rdsExpiredNonce,
 		totalXDSRejects,
 		monServices,
@@ -189,5 +205,6 @@ func init() {
 		pushContextErrors,
 		totalXDSInternalErrors,
 		inboundUpdates,
+		pushTriggers,
 	)
 }

@@ -16,6 +16,7 @@ package v1alpha3
 
 import (
 	"reflect"
+	"sort"
 	"testing"
 
 	auth "github.com/envoyproxy/go-control-plane/envoy/api/v2/auth"
@@ -32,27 +33,26 @@ import (
 	"istio.io/istio/pilot/pkg/security/model"
 	"istio.io/istio/pkg/config/constants"
 	"istio.io/istio/pkg/config/mesh"
-	"istio.io/istio/pkg/config/schemas"
+	"istio.io/istio/pkg/config/schema/collections"
+	"istio.io/istio/pkg/config/schema/resource"
 	"istio.io/istio/pkg/proto"
 )
 
 func TestBuildGatewayListenerTlsContext(t *testing.T) {
 	testCases := []struct {
-		name                  string
-		server                *networking.Server
-		enableIngressSdsAgent bool
-		sdsPath               string
-		result                *auth.DownstreamTlsContext
+		name    string
+		server  *networking.Server
+		sdsPath string
+		result  *auth.DownstreamTlsContext
 	}{
 		{
-			name: "ingress sdsagent disabled, mesh SDS disabled, tls mode ISTIO_MUTUAL",
+			name: "mesh SDS disabled, tls mode ISTIO_MUTUAL",
 			server: &networking.Server{
 				Hosts: []string{"httpbin.example.com"},
 				Tls: &networking.Server_TLSOptions{
 					Mode: networking.Server_TLSOptions_ISTIO_MUTUAL,
 				},
 			},
-			enableIngressSdsAgent: false,
 			result: &auth.DownstreamTlsContext{
 				CommonTlsContext: &auth.CommonTlsContext{
 					AlpnProtocols: util.ALPNHttp,
@@ -84,15 +84,14 @@ func TestBuildGatewayListenerTlsContext(t *testing.T) {
 			},
 		},
 		{
-			name: "ingress sdsagent disabled, mesh SDS enabled, tls mode ISTIO_MUTUAL",
+			name: "mesh SDS enabled, tls mode ISTIO_MUTUAL",
 			server: &networking.Server{
 				Hosts: []string{"httpbin.example.com"},
 				Tls: &networking.Server_TLSOptions{
 					Mode: networking.Server_TLSOptions_ISTIO_MUTUAL,
 				},
 			},
-			enableIngressSdsAgent: false,
-			sdsPath:               "unix:/var/run/sds/uds_path",
+			sdsPath: "unix:/var/run/sds/uds_path",
 			result: &auth.DownstreamTlsContext{
 				CommonTlsContext: &auth.CommonTlsContext{
 					AlpnProtocols: util.ALPNHttp,
@@ -106,18 +105,8 @@ func TestBuildGatewayListenerTlsContext(t *testing.T) {
 										ApiType: core.ApiConfigSource_GRPC,
 										GrpcServices: []*core.GrpcService{
 											{
-												TargetSpecifier: &core.GrpcService_GoogleGrpc_{
-													GoogleGrpc: &core.GrpcService_GoogleGrpc{
-														TargetUri:  "unix:/var/run/sds/uds_path",
-														StatPrefix: model.SDSStatPrefix,
-														ChannelCredentials: &core.GrpcService_GoogleGrpc_ChannelCredentials{
-															CredentialSpecifier: &core.GrpcService_GoogleGrpc_ChannelCredentials_LocalCredentials{
-																LocalCredentials: &core.GrpcService_GoogleGrpc_GoogleLocalCredentials{},
-															},
-														},
-														CallCredentials:        model.ConstructgRPCCallCredentials(model.K8sSATrustworthyJwtFileName, model.K8sSAJwtTokenHeaderKey),
-														CredentialsFactoryName: model.FileBasedMetadataPlugName,
-													},
+												TargetSpecifier: &core.GrpcService_EnvoyGrpc_{
+													EnvoyGrpc: &core.GrpcService_EnvoyGrpc{ClusterName: model.SDSClusterName},
 												},
 											},
 										},
@@ -138,18 +127,8 @@ func TestBuildGatewayListenerTlsContext(t *testing.T) {
 											ApiType: core.ApiConfigSource_GRPC,
 											GrpcServices: []*core.GrpcService{
 												{
-													TargetSpecifier: &core.GrpcService_GoogleGrpc_{
-														GoogleGrpc: &core.GrpcService_GoogleGrpc{
-															TargetUri:  "unix:/var/run/sds/uds_path",
-															StatPrefix: model.SDSStatPrefix,
-															ChannelCredentials: &core.GrpcService_GoogleGrpc_ChannelCredentials{
-																CredentialSpecifier: &core.GrpcService_GoogleGrpc_ChannelCredentials_LocalCredentials{
-																	LocalCredentials: &core.GrpcService_GoogleGrpc_GoogleLocalCredentials{},
-																},
-															},
-															CallCredentials:        model.ConstructgRPCCallCredentials(model.K8sSATrustworthyJwtFileName, model.K8sSAJwtTokenHeaderKey),
-															CredentialsFactoryName: model.FileBasedMetadataPlugName,
-														},
+													TargetSpecifier: &core.GrpcService_EnvoyGrpc_{
+														EnvoyGrpc: &core.GrpcService_EnvoyGrpc{ClusterName: model.SDSClusterName},
 													},
 												},
 											},
@@ -171,7 +150,6 @@ func TestBuildGatewayListenerTlsContext(t *testing.T) {
 					Mode: networking.Server_TLSOptions_SIMPLE,
 				},
 			},
-			enableIngressSdsAgent: true,
 			result: &auth.DownstreamTlsContext{
 				CommonTlsContext: &auth.CommonTlsContext{
 					AlpnProtocols: util.ALPNHttp,
@@ -202,7 +180,6 @@ func TestBuildGatewayListenerTlsContext(t *testing.T) {
 					CredentialName: "ingress-sds-resource-name",
 				},
 			},
-			enableIngressSdsAgent: true,
 			result: &auth.DownstreamTlsContext{
 				CommonTlsContext: &auth.CommonTlsContext{
 					AlpnProtocols: util.ALPNHttp,
@@ -244,7 +221,6 @@ func TestBuildGatewayListenerTlsContext(t *testing.T) {
 					SubjectAltNames: []string{"subject.name.a.com", "subject.name.b.com"},
 				},
 			},
-			enableIngressSdsAgent: true,
 			result: &auth.DownstreamTlsContext{
 				CommonTlsContext: &auth.CommonTlsContext{
 					AlpnProtocols: util.ALPNHttp,
@@ -290,7 +266,6 @@ func TestBuildGatewayListenerTlsContext(t *testing.T) {
 					PrivateKey:        "private-key.key",
 				},
 			},
-			enableIngressSdsAgent: false,
 			result: &auth.DownstreamTlsContext{
 				CommonTlsContext: &auth.CommonTlsContext{
 					AlpnProtocols: util.ALPNHttp,
@@ -322,7 +297,6 @@ func TestBuildGatewayListenerTlsContext(t *testing.T) {
 					PrivateKey:        "private-key.key",
 				},
 			},
-			enableIngressSdsAgent: true,
 			result: &auth.DownstreamTlsContext{
 				CommonTlsContext: &auth.CommonTlsContext{
 					AlpnProtocols: util.ALPNHttp,
@@ -357,7 +331,6 @@ func TestBuildGatewayListenerTlsContext(t *testing.T) {
 					SubjectAltNames:   []string{"subject.name.a.com", "subject.name.b.com"},
 				},
 			},
-			enableIngressSdsAgent: true,
 			result: &auth.DownstreamTlsContext{
 				CommonTlsContext: &auth.CommonTlsContext{
 					AlpnProtocols: util.ALPNHttp,
@@ -427,7 +400,6 @@ func TestBuildGatewayListenerTlsContext(t *testing.T) {
 					VerifyCertificateSpki: []string{"abcdef"},
 				},
 			},
-			enableIngressSdsAgent: true,
 			result: &auth.DownstreamTlsContext{
 				CommonTlsContext: &auth.CommonTlsContext{
 					AlpnProtocols: util.ALPNHttp,
@@ -497,7 +469,6 @@ func TestBuildGatewayListenerTlsContext(t *testing.T) {
 					VerifyCertificateHash: []string{"fedcba"},
 				},
 			},
-			enableIngressSdsAgent: true,
 			result: &auth.DownstreamTlsContext{
 				CommonTlsContext: &auth.CommonTlsContext{
 					AlpnProtocols: util.ALPNHttp,
@@ -566,15 +537,14 @@ func TestBuildGatewayListenerTlsContext(t *testing.T) {
 					PrivateKey:        "private-key.key",
 				},
 			},
-			enableIngressSdsAgent: true,
-			result:                nil,
+			result: nil,
 		},
 	}
 
 	for _, tc := range testCases {
-		ret := buildGatewayListenerTLSContext(tc.server, tc.enableIngressSdsAgent, tc.sdsPath, &pilot_model.NodeMetadata{})
+		ret := buildGatewayListenerTLSContext(tc.server, tc.sdsPath, &pilot_model.NodeMetadata{SdsEnabled: true})
 		if !reflect.DeepEqual(tc.result, ret) {
-			t.Errorf("test case %s: expecting %v but got %v", tc.name, tc.result, ret)
+			t.Errorf("test case %s: expecting:\n %v but got:\n %v", tc.name, tc.result, ret)
 		}
 	}
 }
@@ -602,7 +572,6 @@ func TestCreateGatewayHTTPFilterChainOpts(t *testing.T) {
 				httpOpts: &httpListenerOpts{
 					rds:              "some-route",
 					useRemoteAddress: true,
-					direction:        http_conn.HttpConnectionManager_Tracing_EGRESS,
 					connectionManager: &http_conn.HttpConnectionManager{
 						ForwardClientCertDetails: http_conn.HttpConnectionManager_SANITIZE_SET,
 						SetCurrentClientCertDetails: &http_conn.HttpConnectionManager_SetCurrentClientCertDetails{
@@ -666,7 +635,6 @@ func TestCreateGatewayHTTPFilterChainOpts(t *testing.T) {
 				httpOpts: &httpListenerOpts{
 					rds:              "some-route",
 					useRemoteAddress: true,
-					direction:        http_conn.HttpConnectionManager_Tracing_EGRESS,
 					connectionManager: &http_conn.HttpConnectionManager{
 						ForwardClientCertDetails: http_conn.HttpConnectionManager_SANITIZE_SET,
 						SetCurrentClientCertDetails: &http_conn.HttpConnectionManager_SetCurrentClientCertDetails{
@@ -728,7 +696,6 @@ func TestCreateGatewayHTTPFilterChainOpts(t *testing.T) {
 				httpOpts: &httpListenerOpts{
 					rds:              "some-route",
 					useRemoteAddress: true,
-					direction:        http_conn.HttpConnectionManager_Tracing_EGRESS,
 					connectionManager: &http_conn.HttpConnectionManager{
 						ForwardClientCertDetails: http_conn.HttpConnectionManager_SANITIZE_SET,
 						SetCurrentClientCertDetails: &http_conn.HttpConnectionManager_SetCurrentClientCertDetails{
@@ -790,7 +757,6 @@ func TestCreateGatewayHTTPFilterChainOpts(t *testing.T) {
 				httpOpts: &httpListenerOpts{
 					rds:              "some-route",
 					useRemoteAddress: true,
-					direction:        http_conn.HttpConnectionManager_Tracing_EGRESS,
 					connectionManager: &http_conn.HttpConnectionManager{
 						ForwardClientCertDetails: http_conn.HttpConnectionManager_SANITIZE_SET,
 						SetCurrentClientCertDetails: &http_conn.HttpConnectionManager_SetCurrentClientCertDetails{
@@ -852,7 +818,7 @@ func TestGatewayHTTPRouteConfig(t *testing.T) {
 	}
 	virtualService := pilot_model.Config{
 		ConfigMeta: pilot_model.ConfigMeta{
-			Type:      schemas.VirtualService.Type,
+			Type:      collections.IstioNetworkingV1Alpha3Virtualservices.Resource().Kind(),
 			Name:      "virtual-service",
 			Namespace: "default",
 		},
@@ -860,7 +826,7 @@ func TestGatewayHTTPRouteConfig(t *testing.T) {
 	}
 	virtualServiceCopy := pilot_model.Config{
 		ConfigMeta: pilot_model.ConfigMeta{
-			Type:      schemas.VirtualService.Type,
+			Type:      collections.IstioNetworkingV1Alpha3Virtualservices.Resource().Kind(),
 			Name:      "virtual-service-copy",
 			Namespace: "default",
 		},
@@ -868,7 +834,7 @@ func TestGatewayHTTPRouteConfig(t *testing.T) {
 	}
 	virtualServiceWildcard := pilot_model.Config{
 		ConfigMeta: pilot_model.ConfigMeta{
-			Type:      schemas.VirtualService.Type,
+			Type:      collections.IstioNetworkingV1Alpha3Virtualservices.Resource().Kind(),
 			Name:      "virtual-service-wildcard",
 			Namespace: "default",
 		},
@@ -896,35 +862,51 @@ func TestGatewayHTTPRouteConfig(t *testing.T) {
 		virtualServices      []pilot_model.Config
 		gateways             []pilot_model.Config
 		routeName            string
-		expectedVirtualHosts []string
+		expectedVirtualHosts map[string][]string
 	}{
 		{
 			"404 when no services",
 			[]pilot_model.Config{},
 			[]pilot_model.Config{httpGateway},
 			"http.80",
-			[]string{"blackhole:80"},
+			map[string][]string{
+				"blackhole:80": {
+					"*",
+				},
+			},
 		},
 		{
 			"add a route for a virtual service",
 			[]pilot_model.Config{virtualService},
 			[]pilot_model.Config{httpGateway},
 			"http.80",
-			[]string{"example.org:80"},
+			map[string][]string{
+				"example.org:80": {
+					"example.org", "example.org:*",
+				},
+			},
 		},
 		{
 			"duplicate virtual service should merge",
 			[]pilot_model.Config{virtualService, virtualServiceCopy},
 			[]pilot_model.Config{httpGateway},
 			"http.80",
-			[]string{"example.org:80"},
+			map[string][]string{
+				"example.org:80": {
+					"example.org", "example.org:*",
+				},
+			},
 		},
 		{
 			"duplicate by wildcard should merge",
 			[]pilot_model.Config{virtualService, virtualServiceWildcard},
 			[]pilot_model.Config{httpGateway},
 			"http.80",
-			[]string{"example.org:80"},
+			map[string][]string{
+				"example.org:80": {
+					"example.org", "example.org:*",
+				},
+			},
 		},
 	}
 	for _, tt := range cases {
@@ -933,13 +915,13 @@ func TestGatewayHTTPRouteConfig(t *testing.T) {
 			configgen := NewConfigGenerator([]plugin.Plugin{p})
 			env := buildEnv(t, tt.gateways, tt.virtualServices)
 			proxy14Gateway.SetGatewaysForProxy(env.PushContext)
-			route := configgen.buildGatewayHTTPRouteConfig(&env, &proxy14Gateway, env.PushContext, tt.routeName)
+			route := configgen.buildGatewayHTTPRouteConfig(&proxy14Gateway, env.PushContext, tt.routeName)
 			if route == nil {
 				t.Fatal("got an empty route configuration")
 			}
-			vh := make([]string, 0)
+			vh := make(map[string][]string)
 			for _, h := range route.VirtualHosts {
-				vh = append(vh, h.Name)
+				vh[h.Name] = h.Domains
 			}
 			if !reflect.DeepEqual(tt.expectedVirtualHosts, vh) {
 				t.Errorf("got unexpected virtual hosts. Expected: %v, Got: %v", tt.expectedVirtualHosts, vh)
@@ -949,26 +931,96 @@ func TestGatewayHTTPRouteConfig(t *testing.T) {
 
 }
 
+func TestBuildGatewayListeners(t *testing.T) {
+	cases := []struct {
+		name              string
+		node              *pilot_model.Proxy
+		gateway           *networking.Gateway
+		expectedListeners []string
+	}{
+		{
+			"targetPort overrides service port",
+			&pilot_model.Proxy{
+				ServiceInstances: []*pilot_model.ServiceInstance{
+					{
+						Service: &pilot_model.Service{
+							Hostname: "test",
+						},
+						ServicePort: &pilot_model.Port{
+							Port: 80,
+						},
+						Endpoint: &pilot_model.IstioEndpoint{
+							EndpointPort: 8080,
+						},
+					},
+				},
+			},
+			&networking.Gateway{
+				Servers: []*networking.Server{
+					{
+						Port: &networking.Port{Name: "http", Number: 80, Protocol: "HTTP"},
+					},
+				},
+			},
+			[]string{"0.0.0.0_8080"},
+		},
+		{
+			"multiple ports",
+			&pilot_model.Proxy{},
+			&networking.Gateway{
+				Servers: []*networking.Server{
+					{
+						Port: &networking.Port{Name: "http", Number: 80, Protocol: "HTTP"},
+					},
+					{
+						Port: &networking.Port{Name: "http", Number: 801, Protocol: "HTTP"},
+					},
+				},
+			},
+			[]string{"0.0.0.0_80", "0.0.0.0_801"},
+		},
+	}
+
+	for _, tt := range cases {
+		p := &fakePlugin{}
+		configgen := NewConfigGenerator([]plugin.Plugin{p})
+		env := buildEnv(t, []pilot_model.Config{{Spec: tt.gateway}}, []pilot_model.Config{})
+		proxy14Gateway.SetGatewaysForProxy(env.PushContext)
+		proxy14Gateway.ServiceInstances = tt.node.ServiceInstances
+		builder := configgen.buildGatewayListeners(&proxy14Gateway, env.PushContext, &ListenerBuilder{})
+		var listeners []string
+		for _, l := range builder.gatewayListeners {
+			listeners = append(listeners, l.Name)
+		}
+		sort.Strings(listeners)
+		sort.Strings(tt.expectedListeners)
+		if !reflect.DeepEqual(listeners, tt.expectedListeners) {
+			t.Fatalf("Expected listeners: %v, got: %v\n%v", tt.expectedListeners, listeners, proxy14Gateway.MergedGateway.Servers)
+		}
+	}
+}
+
 func buildEnv(t *testing.T, gateways []pilot_model.Config, virtualServices []pilot_model.Config) pilot_model.Environment {
 	serviceDiscovery := new(fakes.ServiceDiscovery)
 
 	configStore := &fakes.IstioConfigStore{}
 	configStore.GatewaysReturns(gateways)
-	configStore.ListStub = func(typ, namespace string) (configs []pilot_model.Config, e error) {
-		if typ == "virtual-service" {
+	configStore.ListStub = func(kind resource.GroupVersionKind, namespace string) (configs []pilot_model.Config, e error) {
+		switch kind {
+		case collections.IstioNetworkingV1Alpha3Virtualservices.Resource().GroupVersionKind():
 			return virtualServices, nil
-		}
-		if typ == "gateway" {
+		case collections.IstioNetworkingV1Alpha3Gateways.Resource().GroupVersionKind():
 			return gateways, nil
+		default:
+			return nil, nil
 		}
-		return nil, nil
 	}
 	m := mesh.DefaultMeshConfig()
 	env := pilot_model.Environment{
 		PushContext:      pilot_model.NewPushContext(),
 		ServiceDiscovery: serviceDiscovery,
 		IstioConfigStore: configStore,
-		Mesh:             &m,
+		Watcher:          mesh.NewFixedWatcher(&m),
 	}
 
 	if err := env.PushContext.InitContext(&env, nil, nil); err != nil {

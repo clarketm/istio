@@ -18,7 +18,8 @@ import (
 	"sort"
 	"time"
 
-	adminapi "github.com/envoyproxy/go-control-plane/envoy/admin/v2alpha"
+	adminapi "github.com/envoyproxy/go-control-plane/envoy/admin/v3"
+	xdsapi "github.com/envoyproxy/go-control-plane/envoy/api/v2"
 	"github.com/golang/protobuf/ptypes"
 )
 
@@ -55,8 +56,36 @@ func (w *Wrapper) GetDynamicRouteDump(stripVersions bool) (*adminapi.RoutesConfi
 	}
 	drc := routeDump.GetDynamicRouteConfigs()
 	sort.Slice(drc, func(i, j int) bool {
-		return drc[i].RouteConfig.Name < drc[j].RouteConfig.Name
+		route := &xdsapi.RouteConfiguration{}
+		err = ptypes.UnmarshalAny(drc[i].RouteConfig, route)
+		if err != nil {
+			return false
+		}
+		name := route.Name
+		err = ptypes.UnmarshalAny(drc[j].RouteConfig, route)
+		if err != nil {
+			return false
+		}
+		return name < route.Name
 	})
+
+	// In Istio 1.5, it is not enough just to sort the routes.  The virtual hosts
+	// within a route might have a different order.  Sort those too.
+	for i := range drc {
+		route := &xdsapi.RouteConfiguration{}
+		err = ptypes.UnmarshalAny(drc[i].RouteConfig, route)
+		if err != nil {
+			return nil, err
+		}
+		sort.Slice(route.VirtualHosts, func(i, j int) bool {
+			return route.VirtualHosts[i].Name < route.VirtualHosts[j].Name
+		})
+		drc[i].RouteConfig, err = ptypes.MarshalAny(route)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	if stripVersions {
 		for i := range drc {
 			drc[i].VersionInfo = ""
